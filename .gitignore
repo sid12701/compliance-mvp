@@ -1,0 +1,58 @@
+# .gitignore  (ROOT)
+
+# ── Secrets — NEVER commit ──────────────────────────────
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ── Node.js ──────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.Python
+venv/
+env/
+.venv/
+
+# ── Python script local outputs (never commit generated files) ──
+output/
+logs/
+batch_tracker.txt
+pan_list.txt
+*.log
+
+# ── OS files ─────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini
+
+# ── IDE files ────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── Build outputs ────────────────────────────────────────
+frontend/dist/
+frontend/build/
+
+# ── Test coverage ────────────────────────────────────────
+coverage/
+.nyc_output/
+
+
+
+__pycache__/
+*.pyc
+backend/python/test_input.json
+backend/python/test_upload.json
+backend/python/test_run.bat
