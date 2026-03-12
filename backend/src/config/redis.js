@@ -4,19 +4,18 @@
 const Redis  = require('ioredis');
 const config = require('./env');
 
-// ── Redis client factory ──────────────────────────────────────────
+// ── BullMQ connection factory ─────────────────────────────────────
 // BullMQ requires a NEW connection per Queue and per Worker.
-// This factory is called each time a new connection is needed.
-// Never share a single ioredis instance across multiple BullMQ objects.
+// lazyConnect must be FALSE for workers — they use blocking commands
+// (BLMOVE) and must connect immediately to start polling for jobs.
 function createRedisClient() {
   const client = new Redis(config.redis.url, {
-    maxRetriesPerRequest: null, // Required by BullMQ — do not change
+    maxRetriesPerRequest: null,  // Required by BullMQ — do not change
     enableReadyCheck:     false,
-    lazyConnect:          true,
+    lazyConnect:          false, // MUST be false for BullMQ workers
   });
 
   client.on('error', (err) => {
-    // Log but do not crash — BullMQ handles reconnection internally
     console.error('[Redis] Connection error:', err.message);
   });
 
@@ -28,8 +27,6 @@ function createRedisClient() {
 }
 
 // ── Shared client for non-BullMQ use ─────────────────────────────
-// Used by the token blacklist cleanup job (post-MVP).
-// NOT used by BullMQ queues or workers.
 const redisClient = createRedisClient();
 
 module.exports = { createRedisClient, redisClient };

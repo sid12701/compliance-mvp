@@ -10,6 +10,8 @@ const { QUEUE_NAMES,
 const { runPythonScript }         = require('../utils/ipcRunner');
 const { sanitizePAN }             = require('../utils/panSanitizer');
 const { AUDIT_ACTIONS }           = require('../constants/auditActions');
+const { insertAuditLog }          = require('../services/audit.service');
+const { sendFailedAlert }         = require('../services/email.service');
 const r2Service                   = require('../services/r2.service');
 
 function createResponseAnalysisWorker() {
@@ -28,8 +30,6 @@ function createResponseAnalysisWorker() {
 
       try {
         // ── Fetch response file from R2 ────────────────────────
-        // Python never holds R2 credentials.
-        // Node.js fetches the file and passes contents via stdin.
         const fileBuffer = await r2Service.getObject(responseFileKey);
         const fileBase64 = fileBuffer.toString('base64');
 
@@ -44,18 +44,7 @@ function createResponseAnalysisWorker() {
           requestId
         );
 
-        // result shape:
-        // {
-        //   success: true,
-        //   download_list: [{ pan, ckyc_no }, ...],
-        //   upload_list: [pan, ...],
-        //   download_count: N,
-        //   upload_count: N,
-        //   analyzed_at: ISO string
-        // }
-
         // ── Save analysis result to DB ─────────────────────────
-        // PANs stored in JSONB — NOT in the queue payload
         const analysisResult = {
           download_list:  result.download_list  || [],
           upload_list:    result.upload_list    || [],
@@ -72,25 +61,13 @@ function createResponseAnalysisWorker() {
         );
 
         // ── Enqueue both downstream jobs in parallel ───────────
-        // Both jobs read PANs from response_analysis_result in DB
-        // using batchId — no PAN data in queue payloads
         await Promise.all([
-          enqueueBulkDownload({
-            batchId,
-            targetDate,
-            batchSequence,
-            requestId,
-          }),
-          enqueueUploadGeneration({
-            batchId,
-            targetDate,
-            batchSequence,
-            requestId,
-          }),
+          enqueueBulkDownload({ batchId, targetDate, batchSequence, requestId }),
+          enqueueUploadGeneration({ batchId, targetDate, batchSequence, requestId }),
         ]);
 
         // ── Write audit log ────────────────────────────────────
-        await _insertAuditLog({
+        await insertAuditLog({
           action:   AUDIT_ACTIONS.RESPONSE_PROCESSED,
           batchId,
           metadata: {
@@ -121,7 +98,7 @@ function createResponseAnalysisWorker() {
           [batchId, sanitizedError]
         );
 
-        await _insertAuditLog({
+        await insertAuditLog({
           action:   AUDIT_ACTIONS.BATCH_FAILED,
           batchId,
           metadata: {
@@ -131,12 +108,20 @@ function createResponseAnalysisWorker() {
           },
         });
 
+        sendFailedAlert({
+          targetDate,
+          batchSequence,
+          stage:        'response_analysis',
+          errorMessage: sanitizedError,
+          batchId,
+        }).catch(() => {});
+
         throw err;
       }
     },
     {
       connection:  createRedisClient(),
-      concurrency: 2, // Two response analysis jobs can run simultaneously
+      concurrency: 2,
     }
   );
 
@@ -150,18 +135,6 @@ function createResponseAnalysisWorker() {
   });
 
   return worker;
-}
-
-async function _insertAuditLog({ userId, action, batchId, metadata }) {
-  try {
-    await pool.query(
-      `INSERT INTO audit_log (user_id, action, batch_id, ip_address, metadata)
-       VALUES ($1, $2, $3, NULL, $4)`,
-      [userId || null, action, batchId || null, JSON.stringify(metadata || {})]
-    );
-  } catch (err) {
-    console.error(`[Audit] INSERT failed for action "${action}":`, err.message);
-  }
 }
 
 module.exports = { createResponseAnalysisWorker };

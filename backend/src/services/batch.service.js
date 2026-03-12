@@ -14,6 +14,7 @@ const { formatDateForFilename,
         isFutureDate,
         getWorkingDatesInRange }      = require('../utils/istTime');
 const r2Service                       = require('./r2.service');
+const { insertAuditLog }              = require('./audit.service');
 const { enqueueSearchGeneration,
         enqueueResponseAnalysis }     = require('../workers/queue');
 
@@ -21,8 +22,6 @@ const { enqueueSearchGeneration,
 // PRIVATE HELPERS
 // ════════════════════════════════════════════════════════════════════
 
-// Fetch batch or throw structured error
-// Handles both 404 (not found) and 410 (purged) in one place
 async function _getBatchOrThrow(batchId) {
   const result = await pool.query(
     `SELECT * FROM ckyc_batches WHERE id = $1`,
@@ -50,8 +49,6 @@ async function _getBatchOrThrow(batchId) {
   return batch;
 }
 
-// Assert batch is in one of the expected statuses
-// Used to check preconditions before an operation
 function _assertStatus(batch, ...allowedStatuses) {
   if (!allowedStatuses.includes(batch.status)) {
     throw new AppError(
@@ -63,25 +60,19 @@ function _assertStatus(batch, ...allowedStatuses) {
   }
 }
 
-// Build the R2 key for the search file
-// Uses target_date for the path — this key never changes
 function _buildSearchFileKey(batch) {
   const seq      = String(batch.batch_sequence).padStart(5, '0');
-  const dateStr  = formatDateForFilename(batch.target_date); // DDMMYYYY from target_date
+  const dateStr  = formatDateForFilename(batch.target_date);
   const filename = `IN3860_${dateStr}_V1.1_S${seq}.txt`;
   return r2Paths.searchFile(batch.target_date, filename);
 }
 
-// Build the download filename for the Content-Disposition header
-// Uses TODAY's IST date — not the target_date (PRD requirement)
-// Re-downloads always show the latest download date
 function _buildSearchDownloadFilename(batch) {
   const seq      = String(batch.batch_sequence).padStart(5, '0');
-  const todayStr = formatDateForFilename(new Date()); // DDMMYYYY from today IST
+  const todayStr = formatDateForFilename(new Date());
   return `IN3860_${todayStr}_V1.1_S${seq}.txt`;
 }
 
-// Get the next available batch sequence number
 async function _getNextBatchSequence() {
   const result = await pool.query(
     `SELECT COALESCE(MAX(batch_sequence), 0) + 1 AS next_seq FROM ckyc_batches`
@@ -89,43 +80,15 @@ async function _getNextBatchSequence() {
   return parseInt(result.rows[0].next_seq, 10);
 }
 
-// Audit log helper
-// Phase 6 replaces this with the shared audit.service.js
-// client parameter allows writing inside an existing transaction
-async function _insertAuditLog({ userId, action, batchId, ipAddress, metadata }, client) {
-  try {
-    await (client || pool).query(
-      `INSERT INTO audit_log (user_id, action, batch_id, ip_address, metadata)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        userId    || null,
-        action,
-        batchId   || null,
-        ipAddress || null,
-        JSON.stringify(metadata || {}),
-      ]
-    );
-  } catch (auditErr) {
-    // Audit failure must NEVER block the primary operation
-    // Log as ERROR for manual reconciliation
-    console.error(
-      `[Audit] INSERT failed for action "${action}":`,
-      auditErr.message
-    );
-  }
-}
-
 // ════════════════════════════════════════════════════════════════════
 // PUBLIC SERVICE FUNCTIONS
 // ════════════════════════════════════════════════════════════════════
 
-// ── GET /batches ──────────────────────────────────────────────────
 async function listBatches({ startDate, endDate, status, page = 1, limit = 20 }) {
   const safeLimit  = Math.min(parseInt(limit, 10)  || 20, 100);
   const safePage   = Math.max(parseInt(page, 10)   || 1,  1);
   const offset     = (safePage - 1) * safeLimit;
 
-  // Default to last 30 days if no date range provided
   const from = startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
     .toISOString().split('T')[0];
   const to   = endDate || todayIST();
@@ -177,11 +140,10 @@ async function listBatches({ startDate, endDate, status, page = 1, limit = 20 })
   };
 }
 
-// ── GET /batches/:id ──────────────────────────────────────────────
 async function getBatchById({ batchId, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.BATCH_ACCESSED,
     batchId:   batch.id,
@@ -192,13 +154,7 @@ async function getBatchById({ batchId, userId, ipAddress }) {
   return batch;
 }
 
-// ── POST /internal/trigger-daily-batch ───────────────────────────
-// Called by the CRON webhook controller.
-// Returns { skipped: true } if batch already exists for this date.
-// Returns { created: true, batch } if new batch was created.
 async function triggerDailyBatch({ targetDate, requestId }) {
-
-  // Idempotency check: does a non-FAILED batch already exist for today?
   const existing = await pool.query(
     `SELECT id, status, batch_sequence
      FROM ckyc_batches
@@ -210,7 +166,6 @@ async function triggerDailyBatch({ targetDate, requestId }) {
     return { skipped: true, batch: existing.rows[0] };
   }
 
-  // Check for a FAILED batch to update in-place (re-trigger scenario)
   const failed = await pool.query(
     `SELECT * FROM ckyc_batches
      WHERE target_date = $1 AND status = 'FAILED'
@@ -221,7 +176,6 @@ async function triggerDailyBatch({ targetDate, requestId }) {
   let batch;
 
   if (failed.rows.length > 0) {
-    // Update FAILED batch in-place — never create a duplicate row
     const result = await pool.query(
       `UPDATE ckyc_batches
        SET status = 'PROCESSING', error_message = NULL
@@ -231,7 +185,6 @@ async function triggerDailyBatch({ targetDate, requestId }) {
     );
     batch = result.rows[0];
   } else {
-    // No existing batch — create a fresh one
     const batchSequence = await _getNextBatchSequence();
     const result        = await pool.query(
       `INSERT INTO ckyc_batches (target_date, batch_sequence, status, created_by)
@@ -242,7 +195,6 @@ async function triggerDailyBatch({ targetDate, requestId }) {
     batch = result.rows[0];
   }
 
-  // Build R2 key and enqueue search generation job
   const r2OutputKey = _buildSearchFileKey(batch);
 
   await enqueueSearchGeneration({
@@ -256,11 +208,7 @@ async function triggerDailyBatch({ targetDate, requestId }) {
   return { created: true, batch };
 }
 
-// ── POST /batches/generate ────────────────────────────────────────
-// Manual date range trigger — same pipeline as CRON but for multiple dates
 async function generateBatches({ startDate, endDate, userId, ipAddress, requestId }) {
-
-  // Validate: no future dates
   if (isFutureDate(startDate)) {
     throw new AppError(
       'start_date cannot be in the future.',
@@ -287,7 +235,6 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
     );
   }
 
-  // Get all working dates (Mon–Sat) in the range
   const dates = getWorkingDatesInRange(startDate, endDate);
 
   if (dates.length === 0) {
@@ -298,13 +245,12 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
     );
   }
 
-  // Log the intent before enqueuing any jobs
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.MANUAL_GENERATION_TRIGGERED,
     batchId:   null,
     ipAddress,
-    metadata: {
+    metadata:  {
       date_range_start: startDate,
       date_range_end:   endDate,
       dates_requested:  dates.length,
@@ -316,7 +262,6 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
   const datesFailedRetriggered = [];
 
   for (const date of dates) {
-    // Check for existing non-FAILED batch → skip
     const existing = await pool.query(
       `SELECT id, status FROM ckyc_batches
        WHERE target_date = $1 AND status != 'FAILED'`,
@@ -328,7 +273,6 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
       continue;
     }
 
-    // Check for FAILED batch → re-trigger in-place
     const failed = await pool.query(
       `SELECT * FROM ckyc_batches
        WHERE target_date = $1 AND status = 'FAILED'
@@ -360,7 +304,6 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
       datesQueued.push(date);
     }
 
-    // Enqueue search generation job for this date
     await enqueueSearchGeneration({
       batchId:       batch.id,
       targetDate:    date,
@@ -372,7 +315,6 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
 
   const jobsEnqueued = datesQueued.length + datesFailedRetriggered.length;
 
-  // Advisory message if more than 7 jobs enqueued (PRD FR-7.5)
   const advisory = jobsEnqueued > 7
     ? `${jobsEnqueued} jobs have been enqueued and will process sequentially. ` +
       `This may take ${Math.ceil(jobsEnqueued * 2)}–${Math.ceil(jobsEnqueued * 3)} minutes to complete.`
@@ -387,11 +329,9 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
   };
 }
 
-// ── GET /batches/:id/search-url ───────────────────────────────────
 async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
-  // Must be GENERATED or DOWNLOADED
   _assertStatus(batch, ...SEARCH_DOWNLOAD_ELIGIBLE);
 
   if (!batch.search_file_key) {
@@ -402,30 +342,24 @@ async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
     );
   }
 
-  // Log intent (requested)
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.SEARCH_FILE_URL_REQUESTED,
     batchId:   batch.id,
     ipAddress,
-    metadata: {
+    metadata:  {
       target_date:    batch.target_date,
       batch_sequence: batch.batch_sequence,
     },
   });
 
-  // Download filename uses TODAY's IST date (not target_date)
   const downloadFilename = _buildSearchDownloadFilename(batch);
 
-  // Generate presigned URL
   const { url, expiresAt } = await r2Service.getPresignedDownloadUrl(
     batch.search_file_key,
     downloadFilename
   );
 
-  // DB update in a transaction
-  // First download: GENERATED → DOWNLOADED
-  // Re-downloads: stay DOWNLOADED, just update timestamp
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -439,7 +373,6 @@ async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
         [batch.id]
       );
     } else {
-      // Already DOWNLOADED — only update timestamp
       await client.query(
         `UPDATE ckyc_batches SET last_downloaded_at = NOW() WHERE id = $1`,
         [batch.id]
@@ -454,13 +387,12 @@ async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
     client.release();
   }
 
-  // Log outcome (downloaded)
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.SEARCH_FILE_DOWNLOADED,
     batchId:   batch.id,
     ipAddress,
-    metadata: {
+    metadata:  {
       target_date:    batch.target_date,
       batch_sequence: batch.batch_sequence,
       url_expires_at: expiresAt,
@@ -470,9 +402,6 @@ async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
   return { url, filename: downloadFilename, expires_at: expiresAt };
 }
 
-// ── POST /batches/:id/confirm-upload ─────────────────────────────
-// DOWNLOADED → WAITING_RESPONSE + is_uploaded_ckyc = TRUE
-// Both changes happen in one transaction — atomically or not at all
 async function confirmCKYCUpload({ batchId, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
@@ -483,8 +412,6 @@ async function confirmCKYCUpload({ batchId, userId, ipAddress }) {
   try {
     await client.query('BEGIN');
 
-    // The WHERE clause includes status = 'DOWNLOADED' as a safety guard
-    // against race conditions (two requests confirming simultaneously)
     const result = await client.query(
       `UPDATE ckyc_batches
        SET status = 'WAITING_RESPONSE', is_uploaded_ckyc = TRUE
@@ -501,13 +428,12 @@ async function confirmCKYCUpload({ batchId, userId, ipAddress }) {
       );
     }
 
-    // Audit log inside the same transaction
-    await _insertAuditLog({
+    await insertAuditLog({
       userId,
       action:    AUDIT_ACTIONS.CKYC_UPLOAD_CONFIRMED,
       batchId:   batch.id,
       ipAddress,
-      metadata: {
+      metadata:  {
         target_date:    batch.target_date,
         batch_sequence: batch.batch_sequence,
       },
@@ -524,14 +450,11 @@ async function confirmCKYCUpload({ batchId, userId, ipAddress }) {
   }
 }
 
-// ── GET /batches/:id/response-upload-url ─────────────────────────
-// Validate Response filename → return presigned PUT URL for direct R2 upload
 async function getResponseUploadUrl({ batchId, filename, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
   _assertStatus(batch, BATCH_STATUS.WAITING_RESPONSE);
 
-  // 4-step filename validation — throws AppError with details if any step fails
   validateResponseFilename(filename, {
     batch_sequence: batch.batch_sequence,
     target_date:    batch.target_date instanceof Date
@@ -539,19 +462,16 @@ async function getResponseUploadUrl({ batchId, filename, userId, ipAddress }) {
       : batch.target_date,
   });
 
-  // Build the R2 key where the browser will PUT the file
   const r2Key = r2Paths.responseFile(batch.target_date, filename);
 
-  // Issue presigned PUT URL — browser uploads directly, never through Node.js
   const { url, expiresAt } = await r2Service.getPresignedUploadUrl(r2Key, 'text/plain');
 
-  // Log after validation passes (intent audit entry)
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.RESPONSE_UPLOAD_INITIATED,
     batchId:   batch.id,
     ipAddress,
-    metadata: {
+    metadata:  {
       target_date:        batch.target_date,
       validated_filename: filename,
     },
@@ -560,18 +480,14 @@ async function getResponseUploadUrl({ batchId, filename, userId, ipAddress }) {
   return { url, r2_key: r2Key, expires_at: expiresAt };
 }
 
-// ── POST /batches/:id/process-response ───────────────────────────
-// Confirm file exists in R2 → update DB → enqueue analysis job
 async function processResponse({ batchId, filename, userId, ipAddress, requestId }) {
   const batch = await _getBatchOrThrow(batchId);
 
   _assertStatus(batch, BATCH_STATUS.WAITING_RESPONSE);
 
-  // Build the key where we expect the file to be
-  const r2Key = r2Paths.responseFile(batch.target_date, filename);
-
-  // Verify the file actually landed in R2 — browser could claim upload without doing it
+  const r2Key    = r2Paths.responseFile(batch.target_date, filename);
   const fileInfo = await r2Service.fileExists(r2Key);
+
   if (!fileInfo.exists) {
     throw new AppError(
       'Response file was not found in storage. Please complete the file upload before confirming.',
@@ -583,7 +499,6 @@ async function processResponse({ batchId, filename, userId, ipAddress, requestId
 
   assertValidTransition(batch.status, BATCH_STATUS.PROCESSING_RESPONSE);
 
-  // Update batch: set response_file_key + transition to PROCESSING_RESPONSE
   const result = await pool.query(
     `UPDATE ckyc_batches
      SET status = 'PROCESSING_RESPONSE', response_file_key = $2
@@ -592,21 +507,18 @@ async function processResponse({ batchId, filename, userId, ipAddress, requestId
     [batch.id, r2Key]
   );
 
-  // Log outcome (file confirmed in R2)
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.RESPONSE_FILE_UPLOADED,
     batchId:   batch.id,
     ipAddress,
-    metadata: {
+    metadata:  {
       target_date:     batch.target_date,
       filename,
       file_size_bytes: fileInfo.size || 0,
     },
   });
 
-  // Enqueue response analysis job
-  // The worker will parse the response file and enqueue the two downstream jobs
   await enqueueResponseAnalysis({
     batchId:         batch.id,
     targetDate:      batch.target_date,
@@ -618,8 +530,6 @@ async function processResponse({ batchId, filename, userId, ipAddress, requestId
   return { batch_id: result.rows[0].id, status: result.rows[0].status };
 }
 
-// ── GET /batches/:id/final-urls ───────────────────────────────────
-// Return presigned download URLs for both final output files
 async function getFinalUrls({ batchId, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
@@ -636,24 +546,20 @@ async function getFinalUrls({ batchId, userId, ipAddress }) {
   const seq     = String(batch.batch_sequence).padStart(5, '0');
   const dateStr = formatDateForFilename(batch.target_date);
 
-  // Download file: IN3860_{DATE}_V1.1_S{SEQ}.txt
   const downloadFilename = `IN3860_${dateStr}_V1.1_S${seq}.txt`;
-  // Upload file: extract original filename from the R2 key
   const uploadFilename   = batch.upload_file_key.split('/').pop();
 
-  // Generate both presigned URLs in parallel
   const [downloadResult, uploadResult] = await Promise.all([
     r2Service.getPresignedDownloadUrl(batch.download_file_key, downloadFilename),
     r2Service.getPresignedDownloadUrl(batch.upload_file_key, uploadFilename),
   ]);
 
-  // Log final file download
-  await _insertAuditLog({
+  await insertAuditLog({
     userId,
     action:    AUDIT_ACTIONS.FINAL_FILE_DOWNLOADED,
     batchId:   batch.id,
     ipAddress,
-    metadata: {
+    metadata:  {
       target_date: batch.target_date,
       file_type:   'both',
     },

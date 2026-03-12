@@ -1,16 +1,17 @@
 // backend/src/workers/uploadGen.worker.js
 'use strict';
 
-const { Worker }            = require('bullmq');
-const { pool }              = require('../config/database');
-const { createRedisClient } = require('../config/redis');
-const { QUEUE_NAMES }       = require('./queue');
-const { runPythonScript }   = require('../utils/ipcRunner');
-const { sanitizePAN }       = require('../utils/panSanitizer');
-const { AUDIT_ACTIONS }     = require('../constants/auditActions');
-const { r2Paths }           = require('../utils/r2Paths');
-const { formatDateForFilename } = require('../utils/istTime');
-const { _trySetCompleted }  = require('./bulkDownload.worker');
+const { Worker }                = require('bullmq');
+const { pool }                  = require('../config/database');
+const { createRedisClient }     = require('../config/redis');
+const { QUEUE_NAMES }           = require('./queue');
+const { runPythonScript }       = require('../utils/ipcRunner');
+const { sanitizePAN }           = require('../utils/panSanitizer');
+const { AUDIT_ACTIONS }         = require('../constants/auditActions');
+const { insertAuditLog }        = require('../services/audit.service');
+const { sendFailedAlert }       = require('../services/email.service');
+const { r2Paths }               = require('../utils/r2Paths');
+const { _trySetCompleted }      = require('./bulkDownload.worker');
 
 function createUploadGenWorker() {
   const worker = new Worker(
@@ -39,12 +40,12 @@ function createUploadGenWorker() {
 
         const analysisResult = batchResult.rows[0].response_analysis_result;
         if (!analysisResult || !analysisResult.upload_list) {
-          throw new Error(`No upload_list found in response_analysis_result for batch ${batchId}`);
+          throw new Error(
+            `No upload_list found in response_analysis_result for batch ${batchId}`
+          );
         }
 
         // ── Build R2 output key prefix ─────────────────────────
-        // upload_generator.py may produce multiple files
-        // We pass a prefix and let Python append its own filenames
         const r2OutputKeyPrefix = r2Paths.prefix(targetDate, 'upload');
 
         // ── Run Python script ──────────────────────────────────
@@ -59,9 +60,6 @@ function createUploadGenWorker() {
           requestId
         );
 
-        // result.files_generated = [{ r2_key, file_size_bytes }, ...]
-        // Use the first file as the primary upload_file_key
-        // If multiple files, they are all in R2 under the prefix
         const primaryKey = result.files_generated?.[0]?.r2_key
           || `${r2OutputKeyPrefix}upload_${batchSequence}.zip`;
 
@@ -96,7 +94,7 @@ function createUploadGenWorker() {
           [batchId, sanitizedError]
         );
 
-        await _insertAuditLog({
+        await insertAuditLog({
           action:   AUDIT_ACTIONS.BATCH_FAILED,
           batchId,
           metadata: {
@@ -106,12 +104,20 @@ function createUploadGenWorker() {
           },
         });
 
+        sendFailedAlert({
+          targetDate,
+          batchSequence,
+          stage:        'upload_generation',
+          errorMessage: sanitizedError,
+          batchId,
+        }).catch(() => {});
+
         throw err;
       }
     },
     {
       connection:  createRedisClient(),
-      concurrency: 1, // Gmail-heavy — one at a time to avoid rate limits
+      concurrency: 1,
     }
   );
 
@@ -125,18 +131,6 @@ function createUploadGenWorker() {
   });
 
   return worker;
-}
-
-async function _insertAuditLog({ userId, action, batchId, metadata }) {
-  try {
-    await pool.query(
-      `INSERT INTO audit_log (user_id, action, batch_id, ip_address, metadata)
-       VALUES ($1, $2, $3, NULL, $4)`,
-      [userId || null, action, batchId || null, JSON.stringify(metadata || {})]
-    );
-  } catch (err) {
-    console.error(`[Audit] INSERT failed for action "${action}":`, err.message);
-  }
 }
 
 module.exports = { createUploadGenWorker };

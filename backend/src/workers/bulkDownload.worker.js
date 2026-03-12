@@ -1,14 +1,16 @@
 // backend/src/workers/bulkDownload.worker.js
 'use strict';
 
-const { Worker }            = require('bullmq');
-const { pool }              = require('../config/database');
-const { createRedisClient } = require('../config/redis');
-const { QUEUE_NAMES }       = require('./queue');
-const { runPythonScript }   = require('../utils/ipcRunner');
-const { sanitizePAN }       = require('../utils/panSanitizer');
-const { AUDIT_ACTIONS }     = require('../constants/auditActions');
-const { r2Paths }           = require('../utils/r2Paths');
+const { Worker }                = require('bullmq');
+const { pool }                  = require('../config/database');
+const { createRedisClient }     = require('../config/redis');
+const { QUEUE_NAMES }           = require('./queue');
+const { runPythonScript }       = require('../utils/ipcRunner');
+const { sanitizePAN }           = require('../utils/panSanitizer');
+const { AUDIT_ACTIONS }         = require('../constants/auditActions');
+const { insertAuditLog }        = require('../services/audit.service');
+const { sendFailedAlert }       = require('../services/email.service');
+const { r2Paths }               = require('../utils/r2Paths');
 const { formatDateForFilename } = require('../utils/istTime');
 
 function createBulkDownloadWorker() {
@@ -27,7 +29,6 @@ function createBulkDownloadWorker() {
 
       try {
         // ── Fetch download_list from DB ────────────────────────
-        // PANs are read from DB — never passed through queue payload
         const batchResult = await pool.query(
           `SELECT response_analysis_result, batch_sequence
            FROM ckyc_batches WHERE id = $1`,
@@ -40,13 +41,15 @@ function createBulkDownloadWorker() {
 
         const analysisResult = batchResult.rows[0].response_analysis_result;
         if (!analysisResult || !analysisResult.download_list) {
-          throw new Error(`No download_list found in response_analysis_result for batch ${batchId}`);
+          throw new Error(
+            `No download_list found in response_analysis_result for batch ${batchId}`
+          );
         }
 
         // ── Build R2 output key ────────────────────────────────
-        const seq      = String(batchSequence).padStart(5, '0');
-        const dateStr  = formatDateForFilename(targetDate);
-        const filename = `IN3860_${dateStr}_V1.1_S${seq}.txt`;
+        const seq         = String(batchSequence).padStart(5, '0');
+        const dateStr     = formatDateForFilename(targetDate);
+        const filename    = `IN3860_${dateStr}_V1.1_S${seq}.txt`;
         const r2OutputKey = r2Paths.downloadFile(targetDate, filename);
 
         // ── Run Python script ──────────────────────────────────
@@ -69,7 +72,7 @@ function createBulkDownloadWorker() {
           [batchId, result.r2_key_written || r2OutputKey]
         );
 
-        // ── Try to set COMPLETED (atomic — see pattern explanation above)
+        // ── Try to set COMPLETED ───────────────────────────────
         await _trySetCompleted(batchId);
 
         console.log(JSON.stringify({
@@ -92,7 +95,7 @@ function createBulkDownloadWorker() {
           [batchId, sanitizedError]
         );
 
-        await _insertAuditLog({
+        await insertAuditLog({
           action:   AUDIT_ACTIONS.BATCH_FAILED,
           batchId,
           metadata: {
@@ -101,6 +104,14 @@ function createBulkDownloadWorker() {
             stage:       'bulk_download',
           },
         });
+
+        sendFailedAlert({
+          targetDate,
+          batchSequence,
+          stage:        'bulk_download',
+          errorMessage: sanitizedError,
+          batchId,
+        }).catch(() => {});
 
         throw err;
       }
@@ -123,10 +134,6 @@ function createBulkDownloadWorker() {
   return worker;
 }
 
-// ── Atomic completion check ───────────────────────────────────────
-// Sets status = COMPLETED only when BOTH file keys are present.
-// Safe to call from both bulkDownload and uploadGen workers —
-// only the second one to complete will actually update the row.
 async function _trySetCompleted(batchId) {
   const result = await pool.query(
     `UPDATE ckyc_batches
@@ -145,18 +152,6 @@ async function _trySetCompleted(batchId) {
       timestamp: new Date().toISOString(),
       message:   `Batch ${batchId} → COMPLETED`,
     }));
-  }
-}
-
-async function _insertAuditLog({ userId, action, batchId, metadata }) {
-  try {
-    await pool.query(
-      `INSERT INTO audit_log (user_id, action, batch_id, ip_address, metadata)
-       VALUES ($1, $2, $3, NULL, $4)`,
-      [userId || null, action, batchId || null, JSON.stringify(metadata || {})]
-    );
-  } catch (err) {
-    console.error(`[Audit] INSERT failed for action "${action}":`, err.message);
   }
 }
 

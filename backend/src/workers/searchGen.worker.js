@@ -1,15 +1,17 @@
 // backend/src/workers/searchGen.worker.js
 'use strict';
 
-const { Worker }              = require('bullmq');
-const { pool }                = require('../config/database');
-const { createRedisClient }   = require('../config/redis');
-const { QUEUE_NAMES }         = require('./queue');
-const { runPythonScript }     = require('../utils/ipcRunner');
-const { sanitizePAN }         = require('../utils/panSanitizer');
-const { AUDIT_ACTIONS }       = require('../constants/auditActions');
+const { Worker }                = require('bullmq');
+const { pool }                  = require('../config/database');
+const { createRedisClient }     = require('../config/redis');
+const { QUEUE_NAMES }           = require('./queue');
+const { runPythonScript }       = require('../utils/ipcRunner');
+const { sanitizePAN }           = require('../utils/panSanitizer');
+const { AUDIT_ACTIONS }         = require('../constants/auditActions');
+const { insertAuditLog }        = require('../services/audit.service');
+const { sendGeneratedAlert,
+        sendFailedAlert }       = require('../services/email.service');
 
-// ── Worker ────────────────────────────────────────────────────────
 function createSearchGenWorker() {
   const worker = new Worker(
     QUEUE_NAMES.SEARCH_GENERATION,
@@ -48,8 +50,8 @@ function createSearchGenWorker() {
         );
 
         // ── Write audit log ────────────────────────────────────
-        await _insertAuditLog({
-          userId:   null, // system action
+        await insertAuditLog({
+          userId:   null,
           action:   AUDIT_ACTIONS.BATCH_GENERATED,
           batchId,
           metadata: {
@@ -60,6 +62,14 @@ function createSearchGenWorker() {
             triggered_by:   requestId === 'cron' ? 'cron' : 'manual',
           },
         });
+
+        // ── Send email alert (fire-and-forget) ─────────────────
+        sendGeneratedAlert({
+          targetDate,
+          batchSequence,
+          recordCount: result.record_count || 0,
+          batchId,
+        }).catch(() => {});
 
         console.log(JSON.stringify({
           level:        'INFO',
@@ -82,7 +92,7 @@ function createSearchGenWorker() {
           [batchId, sanitizedError]
         );
 
-        await _insertAuditLog({
+        await insertAuditLog({
           userId:   null,
           action:   AUDIT_ACTIONS.BATCH_FAILED,
           batchId,
@@ -94,6 +104,15 @@ function createSearchGenWorker() {
           },
         });
 
+        // ── Send failure alert (fire-and-forget) ───────────────
+        sendFailedAlert({
+          targetDate,
+          batchSequence,
+          stage:        'search_generation',
+          errorMessage: sanitizedError,
+          batchId,
+        }).catch(() => {});
+
         console.error(JSON.stringify({
           level:     'ERROR',
           timestamp: new Date().toISOString(),
@@ -102,13 +121,12 @@ function createSearchGenWorker() {
           message:   `Search generation failed: ${sanitizedError}`,
         }));
 
-        // Re-throw so BullMQ marks the job as failed
         throw err;
       }
     },
     {
-      connection: createRedisClient(),
-      concurrency: 1, // One search job at a time — prevents Gmail rate limits
+      connection:  createRedisClient(),
+      concurrency: 1,
     }
   );
 
@@ -122,19 +140,6 @@ function createSearchGenWorker() {
   });
 
   return worker;
-}
-
-// ── Shared audit helper ───────────────────────────────────────────
-async function _insertAuditLog({ userId, action, batchId, metadata }) {
-  try {
-    await pool.query(
-      `INSERT INTO audit_log (user_id, action, batch_id, ip_address, metadata)
-       VALUES ($1, $2, $3, NULL, $4)`,
-      [userId || null, action, batchId || null, JSON.stringify(metadata || {})]
-    );
-  } catch (err) {
-    console.error(`[Audit] INSERT failed for action "${action}":`, err.message);
-  }
 }
 
 module.exports = { createSearchGenWorker };
