@@ -17,7 +17,7 @@ const r2Service                       = require('./r2.service');
 const { insertAuditLog }              = require('./audit.service');
 const { enqueueSearchGeneration,
         enqueueResponseAnalysis }     = require('../workers/queue');
-
+const { runPythonScript }             = require('../utils/ipcRunner');
 // ════════════════════════════════════════════════════════════════════
 // PRIVATE HELPERS
 // ════════════════════════════════════════════════════════════════════
@@ -579,6 +579,99 @@ async function getFinalUrls({ batchId, userId, ipAddress }) {
   };
 }
 
+
+async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress }) {
+  let finalPanList = panList || [];
+
+  // If using a completed batch's response analysis instead of manual PANs
+  if (sourceBatchId) {
+    const sourceBatch = await _getBatchOrThrow(sourceBatchId);
+    _assertStatus(sourceBatch, BATCH_STATUS.COMPLETED);
+
+    if (!sourceBatch.response_analysis_result) {
+      throw new AppError(
+        'The selected batch has no response analysis result available.',
+        409,
+        ERROR_CODES.INVALID_STATE_TRANSITION
+      );
+    }
+
+    const analysis = sourceBatch.response_analysis_result;
+    finalPanList   = analysis.pan_list || analysis.pans || [];
+
+    if (finalPanList.length === 0) {
+      throw new AppError(
+        'No PANs found in the selected batch response analysis.',
+        400,
+        ERROR_CODES.INVALID_REQUEST
+      );
+    }
+  }
+
+  if (!finalPanList || finalPanList.length === 0) {
+    throw new AppError(
+      'Either pan_list or source_batch_id must be provided.',
+      400,
+      ERROR_CODES.INVALID_REQUEST
+    );
+  }
+
+  const targetDate    = todayIST();
+  const batchSequence = await _getNextBatchSequence();
+  const r2Prefix      = r2Paths.uploadDir(targetDate);
+
+  const result = await runPythonScript('upload_generator.py', {
+    target_date:          targetDate,
+    batch_sequence:       batchSequence,
+    pan_list:             finalPanList,
+    r2_output_key_prefix: r2Prefix,
+  });
+
+  if (!result.success) {
+    throw new AppError(
+      result.error || 'Upload file generation failed.',
+      500,
+      ERROR_CODES.PYTHON_SCRIPT_FAILED
+    );
+  }
+
+  // Get presigned download URLs for all generated files
+  const files = await Promise.all(
+    (result.files_generated || []).map(async (f) => {
+      const filename = f.r2_key.split('/').pop();
+      const { url, expiresAt } = await r2Service.getPresignedDownloadUrl(
+        f.r2_key,
+        filename
+      );
+      return {
+        filename,
+        r2_key:          f.r2_key,
+        file_size_bytes: f.file_size_bytes,
+        url,
+        expires_at:      expiresAt,
+      };
+    })
+  );
+
+  await insertAuditLog({
+    userId,
+    action:   AUDIT_ACTIONS.UPLOAD_FILE_GENERATED || 'UPLOAD_FILE_GENERATED',
+    batchId:  null,
+    ipAddress,
+    metadata: {
+      target_date:       targetDate,
+      records_processed: result.records_processed,
+      files_count:       files.length,
+      source:            sourceBatchId ? `batch:${sourceBatchId}` : 'manual_pan_list',
+    },
+  });
+
+  return {
+    records_processed: result.records_processed,
+    files,
+  };
+}
+
 module.exports = {
   listBatches,
   getBatchById,
@@ -589,4 +682,5 @@ module.exports = {
   getResponseUploadUrl,
   processResponse,
   getFinalUrls,
+  generateUploadFile
 };

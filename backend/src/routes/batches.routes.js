@@ -12,6 +12,7 @@ const {
   handleGetResponseUploadUrl,
   handleProcessResponse,
   handleGetFinalUrls,
+  handleGenerateUpload,
 } = require('../controllers/batches.controller');
 
 const router = express.Router();
@@ -38,5 +39,12 @@ router.post('/:id/process-response',handleProcessResponse);
 
 // ── Final file download ────────────────────────────────────────────
 router.get('/:id/final-urls',handleGetFinalUrls);
+
+// ── Batch generation (manual)
+router.post('/generate', handleGenerateBatches);
+
+// ── Standalone bulk upload generation  ← ADD THIS
+router.post('/generate-upload', handleGenerateUpload);
+
 
 module.exports = router;

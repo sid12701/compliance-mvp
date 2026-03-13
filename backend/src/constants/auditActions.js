@@ -46,6 +46,9 @@ const AUDIT_ACTIONS = Object.freeze({
   // ── Failure ────────────────────────────────────────────────────
   BATCH_FAILED:                  'BATCH_FAILED',                  // SYSTEM
 
+    // ── Standalone upload file generation ─────────────────────────
+    UPLOAD_FILE_GENERATED:         'UPLOAD_FILE_GENERATED',  // USER 
+
 });
 
 module.exports = { AUDIT_ACTIONS };

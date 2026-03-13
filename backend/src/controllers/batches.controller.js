@@ -188,6 +188,42 @@ async function handleGetFinalUrls(req, res, next) {
   }
 }
 
+// ── POST /api/v1/batches/generate-upload ─────────────────────────
+async function handleGenerateUpload(req, res, next) {
+  try {
+    const { pan_list, source_batch_id } = req.body;
+
+    if (!pan_list && !source_batch_id) {
+      throw new AppError(
+        'Request body must include either pan_list (array of PAN strings) or source_batch_id.',
+        400,
+        ERROR_CODES.INVALID_REQUEST
+      );
+    }
+
+    if (pan_list && !Array.isArray(pan_list)) {
+      throw new AppError(
+        'pan_list must be an array of PAN strings.',
+        400,
+        ERROR_CODES.INVALID_REQUEST
+      );
+    }
+
+    const result = await batchService.generateStandaloneUpload({
+      panList:       pan_list || null,
+      sourceBatchId: source_batch_id || null,
+      userId:        req.user.id,
+      ipAddress:     req.ip,
+      requestId:     req.requestId,
+    });
+
+    res.status(200).json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+
 module.exports = {
   handleListBatches,
   handleGetBatch,
@@ -197,4 +233,5 @@ module.exports = {
   handleGetResponseUploadUrl,
   handleProcessResponse,
   handleGetFinalUrls,
+  handleGenerateUpload,  
 };
