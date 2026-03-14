@@ -18,10 +18,12 @@ const ERROR_CODES = Object.freeze({
 
   // 404 — Resource not found
   BATCH_NOT_FOUND:              'BATCH_NOT_FOUND',
+  NOT_FOUND:                    'NOT_FOUND',               // ← ADD
 
   // 409 — Conflict / state problems
   BATCH_ALREADY_EXISTS:         'BATCH_ALREADY_EXISTS',
   INVALID_STATE_TRANSITION:     'INVALID_STATE_TRANSITION',
+  CONFLICT:                     'CONFLICT',                // ← ADD
 
   // 410 — Gone (retention purge)
   BATCH_PURGED:                 'BATCH_PURGED',
@@ -37,29 +39,29 @@ const ERROR_CODES = Object.freeze({
 
   // 500 — Internal errors
   INTERNAL_ERROR:               'INTERNAL_ERROR',
+  PYTHON_SCRIPT_FAILED:         'PYTHON_SCRIPT_FAILED',    // ← ADD (used in batch.service)
 
   // 503 — Dependency unavailable
   SERVICE_UNAVAILABLE:          'SERVICE_UNAVAILABLE',
 });
 
-// ── HTTP status code map ──────────────────────────────────────────
-// Maps each error code to its correct HTTP status number.
-// Used by the global error handler to set res.status().
 const HTTP_STATUS = Object.freeze({
-  [ERROR_CODES.INVALID_REQUEST]:          400,
-  [ERROR_CODES.UNAUTHORIZED]:             401,
-  [ERROR_CODES.FORBIDDEN]:               403,
-  [ERROR_CODES.BATCH_NOT_FOUND]:         404,
-  [ERROR_CODES.BATCH_ALREADY_EXISTS]:    409,
+  [ERROR_CODES.INVALID_REQUEST]:           400,
+  [ERROR_CODES.UNAUTHORIZED]:              401,
+  [ERROR_CODES.FORBIDDEN]:                403,
+  [ERROR_CODES.BATCH_NOT_FOUND]:          404,
+  [ERROR_CODES.NOT_FOUND]:               404,               // ← ADD
+  [ERROR_CODES.BATCH_ALREADY_EXISTS]:     409,
   [ERROR_CODES.INVALID_STATE_TRANSITION]: 409,
+  [ERROR_CODES.CONFLICT]:                409,               // ← ADD
   [ERROR_CODES.BATCH_PURGED]:            410,
   [ERROR_CODES.FILE_TOO_LARGE]:          413,
   [ERROR_CODES.INVALID_FILENAME]:        422,
   [ERROR_CODES.RATE_LIMIT_EXCEEDED]:     429,
   [ERROR_CODES.INTERNAL_ERROR]:          500,
+  [ERROR_CODES.PYTHON_SCRIPT_FAILED]:    500,               // ← ADD
   [ERROR_CODES.SERVICE_UNAVAILABLE]:     503,
 });
-
 // ── AppError class ────────────────────────────────────────────────
 // Custom error class that carries an error code and HTTP status.
 // Thrown by service and utility functions.

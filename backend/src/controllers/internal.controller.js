@@ -25,7 +25,7 @@ async function handleTriggerDailyBatch(req, res, next) {
     // timingSafeEqual requires same-length Buffers
     // If lengths differ, the secret is wrong — reject immediately
     const expected = Buffer.from(config.cron.secret, 'utf8');
-    const provided = Buffer.from(providedSecret,             'utf8');
+    const provided = Buffer.from(providedSecret, 'utf8');
 
     const secretMatches =
       expected.length === provided.length &&

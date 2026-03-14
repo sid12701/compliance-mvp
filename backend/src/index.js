@@ -20,6 +20,8 @@ const { startWorkers, shutdownWorkers } = require('./workers/index');
 
 // ── Step 4: Route imports ─────────────────────────────────────────
 const authRoutes     = require('./routes/auth.routes');
+const adminRoutes = require('./routes/admin.routes');
+
 // These will be added in later phases:
 // const batchRoutes    = require('./routes/batches.routes');
 // const internalRoutes = require('./routes/internal.routes');
@@ -128,6 +130,7 @@ app.get('/health', async (req, res) => {
 app.use('/api/v1/auth',     authRoutes);
 app.use('/api/v1/batches',   batchRoutes);
 app.use('/api/v1/internal',  internalRoutes);
+app.use('/api/v1/admin', adminRoutes);
 
 // Phase 4 will add:
 // app.use('/api/v1/batches',  batchRoutes);
@@ -184,6 +187,8 @@ async function start() {
     process.exit(1);
   }
 }
+
+
 
 
 start();
