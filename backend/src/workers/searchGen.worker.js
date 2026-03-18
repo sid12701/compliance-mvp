@@ -28,6 +28,15 @@ function createSearchGenWorker() {
       }));
 
       try {
+        // ── Get today's next search sequence ───────────────────
+        if (!batchSequence) {
+          throw new Error('Missing batchSequence for search generation job.');
+        }
+        if (!r2OutputKey) {
+          throw new Error('Missing r2OutputKey for search generation job.');
+        }
+
+
         // ── Run Python script ──────────────────────────────────
         const result = await runPythonScript(
           'search_generator.py',
@@ -39,35 +48,34 @@ function createSearchGenWorker() {
           requestId
         );
 
-        // ── Update batch: PROCESSING → GENERATED ───────────────
+        // ── Update batch: PROCESSING → GENERATED ──────────────
         await pool.query(
           `UPDATE ckyc_batches
            SET status          = 'GENERATED',
                search_file_key = $2,
+               pan_dob_r2_key  = $3,
                error_message   = NULL
            WHERE id = $1 AND status = 'PROCESSING'`,
-          [batchId, result.r2_key_written || r2OutputKey]
+          [batchId, result.r2_key_written || r2OutputKey, result.pan_dob_r2_key || null]
         );
 
-        // ── Write audit log ────────────────────────────────────
         await insertAuditLog({
           userId:   null,
           action:   AUDIT_ACTIONS.BATCH_GENERATED,
           batchId,
           metadata: {
             target_date:    targetDate,
-            batch_sequence: batchSequence,
+            file_sequence:  batchSequence,
             record_count:   result.record_count || 0,
             r2_key:         result.r2_key_written || r2OutputKey,
             triggered_by:   requestId === 'cron' ? 'cron' : 'manual',
           },
         });
 
-        // ── Send email alert (fire-and-forget) ─────────────────
         sendGeneratedAlert({
           targetDate,
           batchSequence,
-          recordCount: result.record_count || 0,
+          recordCount:   result.record_count || 0,
           batchId,
         }).catch(() => {});
 
@@ -77,11 +85,11 @@ function createSearchGenWorker() {
           worker:       'searchGen',
           batchId,
           message:      `Search generation complete`,
+          file_seq:     batchSequence,
           record_count: result.record_count || 0,
         }));
 
       } catch (err) {
-        // ── Handle failure ─────────────────────────────────────
         const sanitizedError = sanitizePAN(err.message || 'Unknown error', 500);
 
         await pool.query(
@@ -104,7 +112,6 @@ function createSearchGenWorker() {
           },
         });
 
-        // ── Send failure alert (fire-and-forget) ───────────────
         sendFailedAlert({
           targetDate,
           batchSequence,
@@ -113,22 +120,17 @@ function createSearchGenWorker() {
           batchId,
         }).catch(() => {});
 
-        console.error(JSON.stringify({
-          level:     'ERROR',
-          timestamp: new Date().toISOString(),
-          worker:    'searchGen',
-          batchId,
-          message:   `Search generation failed: ${sanitizedError}`,
-        }));
-
         throw err;
       }
     },
     {
-      connection:  createRedisClient(),
-      concurrency: 1,
+      connection:      createRedisClient(),
+      concurrency:     1,          // (or 2 — keep as-is per worker)
+      stalledInterval: 300000,     // check stalled jobs every 5 min
+      maxStalledCount: 1,
+      drainDelay:      1,          // 0 = use blocking pop (push-based, no polling)
     }
-  );
+      );
 
   worker.on('failed', (job, err) => {
     console.error(JSON.stringify({

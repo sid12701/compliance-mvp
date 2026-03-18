@@ -120,10 +120,13 @@ function createResponseAnalysisWorker() {
       }
     },
     {
-      connection:  createRedisClient(),
-      concurrency: 2,
+      connection:      createRedisClient(),
+      concurrency:     1,          // (or 2 — keep as-is per worker)
+      stalledInterval: 300000,     // check stalled jobs every 5 min
+      maxStalledCount: 1,
+      drainDelay:      1,          // 0 = use blocking pop (push-based, no polling)
     }
-  );
+      );
 
   worker.on('failed', (job, err) => {
     console.error(JSON.stringify({

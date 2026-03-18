@@ -3,6 +3,7 @@
 
 const { AppError, ERROR_CODES } = require('../constants/errorCodes');
 const batchService              = require('../services/batch.service');
+const { listStandaloneSearches } = require('../services/audit.service');
 
 // ── GET /api/v1/batches ───────────────────────────────────────────
 async function handleListBatches(req, res, next) {
@@ -223,6 +224,139 @@ async function handleGenerateUpload(req, res, next) {
   }
 }
 
+async function handleGenerateSearchStandalone(req, res, next) {
+  try {
+    const { target_date } = req.body;
+
+    if (!target_date) {
+      throw new AppError(
+        'target_date is required in YYYY-MM-DD format.',
+        400,
+        ERROR_CODES.INVALID_REQUEST
+      );
+    }
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(target_date)) {
+      throw new AppError(
+        'target_date must be in YYYY-MM-DD format.',
+        400,
+        ERROR_CODES.INVALID_REQUEST
+      );
+    }
+
+    const result = await batchService.generateSearchStandalone({
+      targetDate: target_date,
+      userId:     req.user.id,
+      ipAddress:  req.ip,
+      requestId:  req.requestId,
+    });
+
+    res.status(202).json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// â”€â”€ GET /api/v1/batches/standalone-searches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async function handleListStandaloneSearches(req, res, next) {
+  try {
+    const { limit } = req.query;
+    const searches = await listStandaloneSearches(limit);
+    res.status(200).json({ success: true, data: { searches } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// â”€â”€ GET /api/v1/batches/standalone-search-url â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async function handleGetStandaloneSearchUrl(req, res, next) {
+  try {
+    const { r2_key, filename } = req.query;
+    const result = await batchService.getStandaloneSearchDownloadUrl({
+      r2Key:    r2_key,
+      filename: filename,
+      userId:   req.user.id,
+      ipAddress: req.ip,
+    });
+    res.status(200).json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function handleStandaloneSearchStream(req, res, next) {
+  try {
+    const { jobId } = req.params;
+    const token = req.query?.token;
+
+    if (!token || typeof token !== 'string') {
+      throw new AppError(
+        'Missing or invalid stream token.',
+        401,
+        ERROR_CODES.UNAUTHORIZED
+      );
+    }
+
+    const { QueueEvents } = require('bullmq');
+    const { createRedisClient } = require('../config/redis');
+    const { getQueue, QUEUE_NAMES } = require('../workers/queue');
+
+    const queue = getQueue(QUEUE_NAMES.STANDALONE_SEARCH);
+    const job = await queue.getJob(jobId);
+    if (!job) {
+      throw new AppError('Standalone search job not found.', 404, ERROR_CODES.NOT_FOUND);
+    }
+
+    if (job.data?.streamToken !== token) {
+      throw new AppError('Invalid stream token.', 401, ERROR_CODES.UNAUTHORIZED);
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const sendAndClose = (payload) => {
+      const eventName = payload.status === 'COMPLETED' ? 'complete' : 'error';
+      res.write(`event: ${eventName}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      res.end();
+    };
+
+    const queueEvents = new QueueEvents(QUEUE_NAMES.STANDALONE_SEARCH, {
+      connection: createRedisClient(),
+    });
+
+    let closed = false;
+    const cleanup = async () => {
+      if (closed) return;
+      closed = true;
+      try {
+        await queueEvents.close();
+      } catch {
+        // ignore
+      }
+    };
+
+    req.on('close', () => {
+      cleanup();
+    });
+
+    try {
+      const returnValue = await job.waitUntilFinished(queueEvents);
+      sendAndClose({ status: 'COMPLETED', result: returnValue });
+    } catch (err) {
+      const reason = err?.message || job.failedReason || 'Standalone search failed.';
+      sendAndClose({ status: 'FAILED', error: reason });
+    } finally {
+      cleanup();
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
 
 module.exports = {
   handleListBatches,
@@ -234,4 +368,8 @@ module.exports = {
   handleProcessResponse,
   handleGetFinalUrls,
   handleGenerateUpload,  
+  handleGenerateSearchStandalone,
+  handleListStandaloneSearches,
+  handleGetStandaloneSearchUrl,
+  handleStandaloneSearchStream,
 };

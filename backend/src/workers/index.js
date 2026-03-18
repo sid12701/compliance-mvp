@@ -5,6 +5,7 @@ const { createSearchGenWorker }          = require('./searchGen.worker');
 const { createResponseAnalysisWorker }   = require('./responseAnalysis.worker');
 const { createBulkDownloadWorker }       = require('./bulkDownload.worker');
 const { createUploadGenWorker }          = require('./uploadGen.worker');
+const { createStandaloneSearchWorker }   = require('./standaloneSearch.worker');
 
 let workers = [];
 
@@ -22,6 +23,7 @@ function startWorkers() {
     createResponseAnalysisWorker(),
     createBulkDownloadWorker(),
     createUploadGenWorker(),
+    createStandaloneSearchWorker(),
   ];
 
   console.log(JSON.stringify({
@@ -33,6 +35,7 @@ function startWorkers() {
       'responseAnalysis',
       'bulkDownload',
       'uploadGen',
+      'standaloneSearch',
     ],
   }));
 

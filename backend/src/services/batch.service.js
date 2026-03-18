@@ -1,6 +1,7 @@
 // backend/src/services/batch.service.js
 'use strict';
 
+const { randomUUID }                 = require('crypto');
 const { pool }                        = require('../config/database');
 const { AppError, ERROR_CODES }       = require('../constants/errorCodes');
 const { BATCH_STATUS,
@@ -13,11 +14,15 @@ const { formatDateForFilename,
         todayIST,
         isFutureDate,
         getWorkingDatesInRange }      = require('../utils/istTime');
+const { runPythonScript }             = require('../utils/ipcRunner');
+const { getNextFileSequence }         = require('../utils/fileSequence');
 const r2Service                       = require('./r2.service');
 const { insertAuditLog }              = require('./audit.service');
 const { enqueueSearchGeneration,
-        enqueueResponseAnalysis }     = require('../workers/queue');
-const { runPythonScript }             = require('../utils/ipcRunner');
+        enqueueResponseAnalysis,
+        enqueueStandaloneSearch }     = require('../workers/queue');
+const { ensureWorkersRunning }        = require('../workers/launcher');
+
 // ════════════════════════════════════════════════════════════════════
 // PRIVATE HELPERS
 // ════════════════════════════════════════════════════════════════════
@@ -60,25 +65,38 @@ function _assertStatus(batch, ...allowedStatuses) {
   }
 }
 
-function _buildSearchFileKey(batch) {
-  const seq      = String(batch.batch_sequence).padStart(5, '0');
-  const dateStr  = formatDateForFilename(batch.target_date);
-  const filename = `IN3860_${dateStr}_V1.1_S${seq}.txt`;
-  return r2Paths.searchFile(batch.target_date, filename);
+function _buildSearchFileKey({ targetDate, fileSeq, filenameDate }) {
+  const seqStr   = String(fileSeq).padStart(5, '0');
+  const filename = `IN3860_${filenameDate}_V1.1_S${seqStr}.txt`;
+  return {
+    r2Key:    r2Paths.searchFile(targetDate, filename),
+    filename,
+  };
 }
 
-function _buildSearchDownloadFilename(batch) {
-  const seq      = String(batch.batch_sequence).padStart(5, '0');
-  const todayStr = formatDateForFilename(new Date());
-  return `IN3860_${todayStr}_V1.1_S${seq}.txt`;
+function _formatDateOnly(dateVal) {
+  if (!dateVal) return null;
+  if (typeof dateVal === 'string') return dateVal.split('T')[0];
+  if (dateVal instanceof Date) return dateVal.toISOString().split('T')[0];
+  return String(dateVal).split('T')[0];
 }
 
-async function _getNextBatchSequence() {
-  const result = await pool.query(
-    `SELECT COALESCE(MAX(batch_sequence), 0) + 1 AS next_seq FROM ckyc_batches`
-  );
-  return parseInt(result.rows[0].next_seq, 10);
+function _assertNotToday(targetDate, actionLabel) {
+  const target = _formatDateOnly(targetDate);
+  const today  = todayIST();
+  if (target && target === today) {
+    throw new AppError(
+      `${actionLabel} for today's batch is disabled until the day ends (IST).`,
+      409,
+      ERROR_CODES.INVALID_STATE_TRANSITION,
+      { target_date: target, today }
+    );
+  }
 }
+
+// ── Build R2 key for search file (used at batch creation time) ────
+// Uses today's date + today's file sequence for the filename
+// but stores under targetDate folder in R2
 
 // ════════════════════════════════════════════════════════════════════
 // PUBLIC SERVICE FUNCTIONS
@@ -173,37 +191,45 @@ async function triggerDailyBatch({ targetDate, requestId }) {
     [targetDate]
   );
 
+  const fileSeq      = await getNextFileSequence('search');
+  const filenameDate = formatDateForFilename(todayIST());
   let batch;
 
   if (failed.rows.length > 0) {
     const result = await pool.query(
       `UPDATE ckyc_batches
-       SET status = 'PROCESSING', error_message = NULL
+       SET status = 'PROCESSING',
+           error_message = NULL,
+           batch_sequence = $2
        WHERE id = $1
        RETURNING *`,
-      [failed.rows[0].id]
+      [failed.rows[0].id, fileSeq]
     );
     batch = result.rows[0];
   } else {
-    const batchSequence = await _getNextBatchSequence();
     const result        = await pool.query(
       `INSERT INTO ckyc_batches (target_date, batch_sequence, status, created_by)
        VALUES ($1, $2, 'PROCESSING', NULL)
        RETURNING *`,
-      [targetDate, batchSequence]
+      [targetDate, fileSeq]
     );
     batch = result.rows[0];
   }
 
-  const r2OutputKey = _buildSearchFileKey(batch);
+  const { r2Key } = _buildSearchFileKey({
+    targetDate,
+    fileSeq,
+    filenameDate,
+  });
 
   await enqueueSearchGeneration({
     batchId:       batch.id,
     targetDate,
-    batchSequence: batch.batch_sequence,
-    r2OutputKey,
+    batchSequence: fileSeq,
+    r2OutputKey:   r2Key,
     requestId,
   });
+  ensureWorkersRunning();
 
   return { created: true, batch };
 }
@@ -239,7 +265,7 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
 
   if (dates.length === 0) {
     throw new AppError(
-      'No working days found in the selected date range. Sundays are excluded.',
+      'No dates found in the selected range.',
       400,
       ERROR_CODES.INVALID_REQUEST
     );
@@ -280,37 +306,48 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
       [date]
     );
 
+    const fileSeq      = await getNextFileSequence('search');
+    const filenameDate = formatDateForFilename(todayIST());
     let batch;
 
     if (failed.rows.length > 0) {
       const result = await pool.query(
         `UPDATE ckyc_batches
-         SET status = 'PROCESSING', error_message = NULL, created_by = $2
+         SET status = 'PROCESSING',
+             error_message = NULL,
+             created_by = $2,
+             batch_sequence = $3
          WHERE id = $1
          RETURNING *`,
-        [failed.rows[0].id, userId]
+        [failed.rows[0].id, userId, fileSeq]
       );
       batch = result.rows[0];
       datesFailedRetriggered.push(date);
     } else {
-      const batchSequence = await _getNextBatchSequence();
       const result        = await pool.query(
         `INSERT INTO ckyc_batches (target_date, batch_sequence, status, created_by)
          VALUES ($1, $2, 'PROCESSING', $3)
          RETURNING *`,
-        [date, batchSequence, userId]
+        [date, fileSeq, userId]
       );
       batch = result.rows[0];
       datesQueued.push(date);
     }
 
+    const { r2Key } = _buildSearchFileKey({
+      targetDate: date,
+      fileSeq,
+      filenameDate,
+    });
+
     await enqueueSearchGeneration({
       batchId:       batch.id,
       targetDate:    date,
-      batchSequence: batch.batch_sequence,
-      r2OutputKey:   _buildSearchFileKey(batch),
+      batchSequence: fileSeq,
+      r2OutputKey:   r2Key,
       requestId,
     });
+    ensureWorkersRunning();
   }
 
   const jobsEnqueued = datesQueued.length + datesFailedRetriggered.length;
@@ -332,6 +369,7 @@ async function generateBatches({ startDate, endDate, userId, ipAddress, requestI
 async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
+  _assertNotToday(batch.target_date, 'Download');
   _assertStatus(batch, ...SEARCH_DOWNLOAD_ELIGIBLE);
 
   if (!batch.search_file_key) {
@@ -353,7 +391,8 @@ async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
     },
   });
 
-  const downloadFilename = _buildSearchDownloadFilename(batch);
+  // Use the exact filename stored in R2 to preserve the original sequence
+  const downloadFilename = batch.search_file_key.split('/').pop();
 
   const { url, expiresAt } = await r2Service.getPresignedDownloadUrl(
     batch.search_file_key,
@@ -394,7 +433,7 @@ async function getSearchDownloadUrl({ batchId, userId, ipAddress }) {
     ipAddress,
     metadata:  {
       target_date:    batch.target_date,
-      batch_sequence: batch.batch_sequence,
+      file_sequence:  batch.batch_sequence,
       url_expires_at: expiresAt,
     },
   });
@@ -460,6 +499,7 @@ async function getResponseUploadUrl({ batchId, filename, userId, ipAddress }) {
     target_date:    batch.target_date instanceof Date
       ? batch.target_date.toISOString().split('T')[0]
       : batch.target_date,
+    search_file_key: batch.search_file_key,
   });
 
   const r2Key = r2Paths.responseFile(batch.target_date, filename);
@@ -526,6 +566,7 @@ async function processResponse({ batchId, filename, userId, ipAddress, requestId
     responseFileKey: r2Key,
     requestId,
   });
+  ensureWorkersRunning();
 
   return { batch_id: result.rows[0].id, status: result.rows[0].status };
 }
@@ -533,6 +574,7 @@ async function processResponse({ batchId, filename, userId, ipAddress, requestId
 async function getFinalUrls({ batchId, userId, ipAddress }) {
   const batch = await _getBatchOrThrow(batchId);
 
+  _assertNotToday(batch.target_date, 'Download');
   _assertStatus(batch, BATCH_STATUS.COMPLETED);
 
   if (!batch.download_file_key || !batch.upload_file_key) {
@@ -543,10 +585,7 @@ async function getFinalUrls({ batchId, userId, ipAddress }) {
     );
   }
 
-  const seq     = String(batch.batch_sequence).padStart(5, '0');
-  const dateStr = formatDateForFilename(batch.target_date);
-
-  const downloadFilename = `IN3860_${dateStr}_V1.1_S${seq}.txt`;
+  const downloadFilename = batch.download_file_key.split('/').pop();
   const uploadFilename   = batch.upload_file_key.split('/').pop();
 
   const [downloadResult, uploadResult] = await Promise.all([
@@ -579,11 +618,9 @@ async function getFinalUrls({ batchId, userId, ipAddress }) {
   };
 }
 
-
 async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress }) {
   let finalPanList = panList || [];
 
-  // If using a completed batch's response analysis instead of manual PANs
   if (sourceBatchId) {
     const sourceBatch = await _getBatchOrThrow(sourceBatchId);
     _assertStatus(sourceBatch, BATCH_STATUS.COMPLETED);
@@ -597,7 +634,7 @@ async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress })
     }
 
     const analysis = sourceBatch.response_analysis_result;
-    finalPanList   = analysis.pan_list || analysis.pans || [];
+    finalPanList   = analysis.upload_list || analysis.pan_list || analysis.pans || [];
 
     if (finalPanList.length === 0) {
       throw new AppError(
@@ -616,15 +653,18 @@ async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress })
     );
   }
 
-  const targetDate    = todayIST();
-  const batchSequence = await _getNextBatchSequence();
-  const r2Prefix      = r2Paths.uploadDir(targetDate);
+  const targetDate = todayIST();
+  const fileSeq    = await getNextFileSequence('upload');
+  const seqStr     = String(fileSeq).padStart(5, '0');
+  const dateStr    = formatDateForFilename(new Date());
+  const r2Prefix   = r2Paths.uploadDir(targetDate);
 
   const result = await runPythonScript('upload_generator.py', {
     target_date:          targetDate,
-    batch_sequence:       batchSequence,
+    batch_sequence:       fileSeq,
     pan_list:             finalPanList,
     r2_output_key_prefix: r2Prefix,
+    filename_date:        dateStr,
   });
 
   if (!result.success) {
@@ -635,7 +675,6 @@ async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress })
     );
   }
 
-  // Get presigned download URLs for all generated files
   const files = await Promise.all(
     (result.files_generated || []).map(async (f) => {
       const filename = f.r2_key.split('/').pop();
@@ -655,11 +694,12 @@ async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress })
 
   await insertAuditLog({
     userId,
-    action:   AUDIT_ACTIONS.UPLOAD_FILE_GENERATED || 'UPLOAD_FILE_GENERATED',
+    action:   AUDIT_ACTIONS.UPLOAD_FILE_GENERATED,
     batchId:  null,
     ipAddress,
     metadata: {
       target_date:       targetDate,
+      file_sequence:     fileSeq,
       records_processed: result.records_processed,
       files_count:       files.length,
       source:            sourceBatchId ? `batch:${sourceBatchId}` : 'manual_pan_list',
@@ -672,6 +712,74 @@ async function generateUploadFile({ panList, sourceBatchId, userId, ipAddress })
   };
 }
 
+async function generateSearchStandalone({ targetDate, userId, ipAddress, requestId }) {
+  if (isFutureDate(targetDate)) {
+    throw new AppError(
+      'target_date cannot be in the future.',
+      400,
+      ERROR_CODES.INVALID_REQUEST
+    );
+  }
+
+  const jobId = randomUUID();
+  const streamToken = randomUUID();
+
+  await enqueueStandaloneSearch({
+    jobId,
+    streamToken,
+    targetDate,
+    requestId,
+    userId,
+    ipAddress,
+  });
+  ensureWorkersRunning();
+
+  return { job_id: jobId, stream_token: streamToken };
+}
+
+async function getStandaloneSearchDownloadUrl({ r2Key, filename, userId, ipAddress }) {
+  if (!r2Key || typeof r2Key !== 'string') {
+    throw new AppError(
+      'Query parameter "r2_key" is required.',
+      400,
+      ERROR_CODES.INVALID_REQUEST
+    );
+  }
+  if (!filename || typeof filename !== 'string') {
+    throw new AppError(
+      'Query parameter "filename" is required.',
+      400,
+      ERROR_CODES.INVALID_REQUEST
+    );
+  }
+
+  const match = r2Key.match(/ckyc\/(\d{4}-\d{2}-\d{2})\//);
+  if (match && match[1] === todayIST()) {
+    throw new AppError(
+      "Download for today's search file is disabled until the day ends (IST).",
+      409,
+      ERROR_CODES.INVALID_STATE_TRANSITION,
+      { target_date: match[1], today: todayIST() }
+    );
+  }
+
+  const { url, expiresAt } = await r2Service.getPresignedDownloadUrl(r2Key, filename);
+
+  await insertAuditLog({
+    userId,
+    action:   AUDIT_ACTIONS.SEARCH_FILE_URL_REQUESTED,
+    batchId:  null,
+    ipAddress,
+    metadata: {
+      r2_key:     r2Key,
+      filename,
+      standalone: true,
+    },
+  });
+
+  return { url, filename, expires_at: expiresAt };
+}
+
 module.exports = {
   listBatches,
   getBatchById,
@@ -682,5 +790,7 @@ module.exports = {
   getResponseUploadUrl,
   processResponse,
   getFinalUrls,
-  generateUploadFile
+  generateUploadFile,
+  generateSearchStandalone,
+  getStandaloneSearchDownloadUrl,
 };

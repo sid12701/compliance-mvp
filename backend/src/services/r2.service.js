@@ -45,6 +45,32 @@ async function getPresignedDownloadUrl(key, downloadFilename) {
   }
 }
 
+// â”€â”€ Presigned view URL (inline) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Generates a temporary URL that lets the browser stream/view a file
+// directly from R2 without forcing a download.
+async function getPresignedViewUrl(key) {
+  validateKey(key);
+
+  const command = new GetObjectCommand({
+    Bucket:                     BUCKET,
+    Key:                        key,
+    ResponseContentDisposition: 'inline',
+  });
+
+  try {
+    const url       = await getSignedUrl(r2Client, command, { expiresIn: PRESIGNED_EXPIRY });
+    const expiresAt = new Date(Date.now() + PRESIGNED_EXPIRY * 1000).toISOString();
+    return { url, expiresAt };
+  } catch (err) {
+    console.error(`[R2] getPresignedViewUrl failed for key "${key}":`, err.message);
+    throw new AppError(
+      'Failed to generate view URL. Storage service may be unavailable.',
+      503,
+      ERROR_CODES.SERVICE_UNAVAILABLE
+    );
+  }
+}
+
 // ── Presigned upload URL ──────────────────────────────────────────
 // Generates a temporary URL that lets the browser PUT a file
 // directly into R2. The file bytes never pass through Node.js.
@@ -162,10 +188,46 @@ async function getObject(key) {
   }
 }
 
+// â”€â”€ Stream object (optionally with range) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Used for media streaming. Supports HTTP Range requests.
+async function getObjectStream(key, range) {
+  validateKey(key);
+
+  const params = { Bucket: BUCKET, Key: key };
+  if (range) params.Range = range;
+
+  try {
+    const command  = new GetObjectCommand(params);
+    const response = await r2Client.send(command);
+    return {
+      stream:       response.Body,
+      contentType:  response.ContentType || 'application/octet-stream',
+      contentLength: response.ContentLength,
+      contentRange: response.ContentRange,
+      acceptRanges: response.AcceptRanges || 'bytes',
+    };
+  } catch (err) {
+    if (err.$metadata?.httpStatusCode === 404) {
+      throw new AppError(
+        `File not found in storage: ${key}`,
+        404,
+        ERROR_CODES.NOT_FOUND
+      );
+    }
+    console.error(`[R2] getObjectStream failed for key "${key}":`, err.message);
+    throw new AppError(
+      `Failed to stream file from storage.`,
+      503,
+      ERROR_CODES.SERVICE_UNAVAILABLE
+    );
+  }
+}
+
 module.exports = {
   getPresignedDownloadUrl,
   getPresignedUploadUrl,
   fileExists,
   putObject,
   getObject,
+  getObjectStream,
 };

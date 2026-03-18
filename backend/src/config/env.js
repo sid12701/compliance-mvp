@@ -106,6 +106,9 @@ const config = Object.freeze({
   cors: {
     frontendUrl: process.env.FRONTEND_URL,
   },
+  workers: {
+    enabled: (process.env.WORKERS_ENABLED || 'false').toLowerCase() === 'true',
+  },
 });
 
 module.exports = config;

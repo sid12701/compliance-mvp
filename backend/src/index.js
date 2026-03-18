@@ -21,6 +21,7 @@ const { startWorkers, shutdownWorkers } = require('./workers/index');
 // ── Step 4: Route imports ─────────────────────────────────────────
 const authRoutes     = require('./routes/auth.routes');
 const adminRoutes = require('./routes/admin.routes');
+const trainingRoutes = require('./routes/training.routes');
 
 // These will be added in later phases:
 // const batchRoutes    = require('./routes/batches.routes');
@@ -131,6 +132,7 @@ app.use('/api/v1/auth',     authRoutes);
 app.use('/api/v1/batches',   batchRoutes);
 app.use('/api/v1/internal',  internalRoutes);
 app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/training', trainingRoutes);
 
 // Phase 4 will add:
 // app.use('/api/v1/batches',  batchRoutes);
@@ -169,8 +171,16 @@ async function start() {
         env:       config.server.nodeEnv,
       }));
 
-      // Start BullMQ workers after HTTP server is listening
-      startWorkers();
+      // Start BullMQ workers only when explicitly enabled
+      if (config.workers.enabled) {
+        startWorkers();
+      } else {
+        console.log(JSON.stringify({
+          level:     'INFO',
+          timestamp: new Date().toISOString(),
+          message:   'Workers disabled (WORKERS_ENABLED=false)',
+        }));
+      }
     });
 
     // ── Graceful shutdown ────────────────────────────────────

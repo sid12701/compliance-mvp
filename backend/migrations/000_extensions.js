@@ -11,6 +11,6 @@ exports.up = async function (knex) {
 
 exports.down = async function (knex) {
   // We do not drop pgcrypto on rollback.
-  // Other databases on the same Postgres instance may use it.
+  // Other databases on the same  instance may use it.
   // Dropping it would be destructive beyond our schema.
 };

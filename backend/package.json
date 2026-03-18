@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "workers": "cross-env WORKERS_ENABLED=true node src/workers/runner.js",
     "lint": "eslint src/ --ext .js",
     "test": "jest --runInBand",
     "create-user": "node scripts/create-user.js",
@@ -18,6 +19,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1007.0",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.71.0",
+    "cross-env": "^7.0.3",
     "date-fns": "^3.3.1",
     "date-fns-tz": "^3.1.3",
     "dotenv": "^16.4.5",

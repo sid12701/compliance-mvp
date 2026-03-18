@@ -12,6 +12,7 @@ const { ERROR_CODES } = require('../constants/errorCodes');
 //   3 = YYYY (year, 4 digits)
 //   4 = SSSSS (sequence, 5 digits)
 const RESPONSE_FILENAME_REGEX = /^IN3860_(\d{2})(\d{2})(\d{4})_V1\.1_S(\d{5})_Res\.txt$/;
+const SEARCH_FILENAME_REGEX   = /^IN3860_(\d{2})(\d{2})(\d{4})_V1\.1_S(\d{5})\.txt$/;
 
 // ── Step 2 helper: real calendar date check ───────────────────────
 // JavaScript's Date constructor is permissive — new Date(2026, 1, 31)
@@ -39,6 +40,31 @@ function isRealCalendarDate(day, month, year) {
 // Returns: { valid: true, parsedDate: 'DD-MM-YYYY', sequence: number }
 // Throws:  AppError with code INVALID_FILENAME and details about which
 //          step failed and what was expected vs received.
+
+function _extractDateFromSearchKey(searchFileKey) {
+  if (!searchFileKey) return null;
+  const base = String(searchFileKey).split('/').pop();
+  const match = SEARCH_FILENAME_REGEX.exec(base || '');
+  if (!match) return null;
+  return {
+    day:   parseInt(match[1], 10),
+    month: parseInt(match[2], 10),
+    year:  parseInt(match[3], 10),
+  };
+}
+
+function _normalizeExpectedDate(expectedDateStr) {
+  if (!expectedDateStr || typeof expectedDateStr !== 'string') return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(expectedDateStr)) {
+    const [year, month, day] = expectedDateStr.split('-').map(Number);
+    return { day, month, year };
+  }
+  if (/^\d{2}-\d{2}-\d{4}$/.test(expectedDateStr)) {
+    const [day, month, year] = expectedDateStr.split('-').map(Number);
+    return { day, month, year };
+  }
+  return null;
+}
 
 function validateResponseFilename(filename, batch) {
 
@@ -103,24 +129,33 @@ function validateResponseFilename(filename, batch) {
   // batch.target_date from PostgreSQL is 'YYYY-MM-DD'
   // Filename date is DD/MM/YYYY from the capture groups
   // We need to compare them as the same date.
-  const [batchYear, batchMonth, batchDay] = batch.target_date
-    .split('-')
-    .map(Number);
+  const expectedFromSearch = _extractDateFromSearchKey(batch.search_file_key);
+  const expectedFromTarget = _normalizeExpectedDate(batch.target_date);
+  const expected = expectedFromSearch || expectedFromTarget;
 
-  if (day !== batchDay || month !== batchMonth || year !== batchYear) {
+  if (!expected) {
+    throw new AppError(
+      'Unable to determine expected date for response filename validation.',
+      422,
+      ERROR_CODES.INVALID_FILENAME,
+      { failed_check: 'missing_expected_date' }
+    );
+  }
+
+  if (day !== expected.day || month !== expected.month || year !== expected.year) {
     // Format dates for human-readable error message
     const filenameDate = `${match[1]}-${match[2]}-${match[3]}`;
-    const batchDate    = `${String(batchDay).padStart(2,'0')}-${String(batchMonth).padStart(2,'0')}-${batchYear}`;
+    const expectedDate = `${String(expected.day).padStart(2,'0')}-${String(expected.month).padStart(2,'0')}-${expected.year}`;
 
     throw new AppError(
-      `Filename date ${filenameDate} does not match batch target date ${batchDate}.`,
+      `Filename date ${filenameDate} does not match expected date ${expectedDate}.`,
       422,
       ERROR_CODES.INVALID_FILENAME,
       {
         failed_check:   'date_mismatch',
         filename_date:  filenameDate,
-        batch_date:     batchDate,
-        hint:           'This Response file belongs to a different batch date',
+        expected_date:  expectedDate,
+        hint:           'This Response file belongs to a different search file date',
       }
     );
   }

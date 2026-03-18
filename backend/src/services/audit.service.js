@@ -100,4 +100,27 @@ async function getRecentActivity(limit = 50) {
   return result.rows;
 }
 
-module.exports = { insertAuditLog, getAuditLogForBatch, getRecentActivity };
+// List standalone search runs (used on standalone search page)
+async function listStandaloneSearches(limit = 20) {
+  const safeLimit = Math.min(parseInt(limit, 10) || 20, 100);
+  const result = await pool.query(
+    `SELECT
+       al.id, al.metadata, al.created_at,
+       u.username
+     FROM audit_log al
+     LEFT JOIN users u ON u.id = al.user_id
+     WHERE al.action = $1
+       AND (al.metadata->>'standalone') = 'true'
+     ORDER BY al.created_at DESC
+     LIMIT $2`,
+    [AUDIT_ACTIONS.SEARCH_FILE_DOWNLOADED, safeLimit]
+  );
+  return result.rows;
+}
+
+module.exports = {
+  insertAuditLog,
+  getAuditLogForBatch,
+  getRecentActivity,
+  listStandaloneSearches,
+};

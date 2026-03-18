@@ -12,6 +12,9 @@ const { insertAuditLog }        = require('../services/audit.service');
 const { sendFailedAlert }       = require('../services/email.service');
 const { r2Paths }               = require('../utils/r2Paths');
 const { _trySetCompleted }      = require('./bulkDownload.worker');
+const { getNextFileSequence }   = require('../utils/fileSequence');
+const { formatDateForFilename,
+        todayIST }              = require('../utils/istTime');
 
 function createUploadGenWorker() {
   const worker = new Worker(
@@ -45,7 +48,15 @@ function createUploadGenWorker() {
           );
         }
 
-        // ── Build R2 output key prefix ─────────────────────────
+        // ── Get today's next upload sequence ───────────────────
+        // Filename uses today's date + today's sequence
+        // but file is stored in targetDate's R2 folder
+        const fileSeq   = await getNextFileSequence('upload');
+        const seqStr    = String(fileSeq).padStart(5, '0');
+        const today     = todayIST();
+        const dateStr   = formatDateForFilename(today)
+
+        // R2 prefix uses targetDate folder, filename uses today's date
         const r2OutputKeyPrefix = r2Paths.prefix(targetDate, 'upload');
 
         // ── Run Python script ──────────────────────────────────
@@ -53,15 +64,16 @@ function createUploadGenWorker() {
           'upload_generator.py',
           {
             target_date:          targetDate,
-            batch_sequence:       batchSequence,
+            batch_sequence:       fileSeq,
             pan_list:             analysisResult.upload_list,
             r2_output_key_prefix: r2OutputKeyPrefix,
+            filename_date:        dateStr,   // today's date for filename
           },
           requestId
         );
 
         const primaryKey = result.files_generated?.[0]?.r2_key
-          || `${r2OutputKeyPrefix}upload_${batchSequence}.zip`;
+          || `${r2OutputKeyPrefix}IN3860_IT_${dateStr}_V1.3_U${seqStr}.zip`;
 
         // ── Update upload_file_key ─────────────────────────────
         await pool.query(
@@ -74,12 +86,24 @@ function createUploadGenWorker() {
         // ── Try to set COMPLETED ───────────────────────────────
         await _trySetCompleted(batchId);
 
+        await insertAuditLog({
+          action:   AUDIT_ACTIONS.BATCH_GENERATED,
+          batchId,
+          metadata: {
+            target_date:    targetDate,
+            file_sequence:  fileSeq,
+            files_generated: result.files_generated?.length || 0,
+            stage:          'upload_generation',
+          },
+        });
+
         console.log(JSON.stringify({
           level:           'INFO',
           timestamp:       new Date().toISOString(),
           worker:          'uploadGen',
           batchId,
           message:         'Upload generation complete',
+          file_seq:        fileSeq,
           files_generated: result.files_generated?.length || 0,
         }));
 
@@ -116,10 +140,13 @@ function createUploadGenWorker() {
       }
     },
     {
-      connection:  createRedisClient(),
-      concurrency: 1,
+      connection:      createRedisClient(),
+      concurrency:     1,          // (or 2 — keep as-is per worker)
+      stalledInterval: 300000,     // check stalled jobs every 5 min
+      maxStalledCount: 1,
+      drainDelay:      1,          // 0 = use blocking pop (push-based, no polling)
     }
-  );
+      );
 
   worker.on('failed', (job, err) => {
     console.error(JSON.stringify({
