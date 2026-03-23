@@ -114,7 +114,7 @@ async function createUser({ username, password, role = 'operator' }) {
     throw new AppError(
       `Username "${username}" is already taken.`,
       409,
-      ERROR_CODES.BATCH_ALREADY_EXISTS
+      ERROR_CODES.CONFLICT
     );
   }
 

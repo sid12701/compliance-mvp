@@ -210,12 +210,11 @@ async function handleGenerateUpload(req, res, next) {
       );
     }
 
-    const result = await batchService.generateStandaloneUpload({
+    const result = await batchService.generateUploadFile({
       panList:       pan_list || null,
       sourceBatchId: source_batch_id || null,
       userId:        req.user.id,
       ipAddress:     req.ip,
-      requestId:     req.requestId,
     });
 
     res.status(200).json({ success: true, data: result });

@@ -225,6 +225,7 @@ async function getObjectStream(key, range) {
 
 module.exports = {
   getPresignedDownloadUrl,
+  getPresignedViewUrl,
   getPresignedUploadUrl,
   fileExists,
   putObject,

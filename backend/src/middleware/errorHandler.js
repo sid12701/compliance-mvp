@@ -39,7 +39,7 @@ function errorHandler(err, req, res, next) {
   };
 
   // Only include stack trace in non-production environments
-  if (!process.env.NODE_ENV === 'production' && err.stack) {
+  if (process.env.NODE_ENV !== 'production' && err.stack) {
     logEntry.stack = sanitizePAN(err.stack);
   }
 
