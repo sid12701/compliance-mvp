@@ -37,7 +37,7 @@ import os
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from html.parser import HTMLParser
 from typing import Optional

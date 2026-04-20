@@ -4,6 +4,11 @@
 const { Pool } = require('pg');
 const config   = require('./env');
 
+// Keep PostgreSQL DATE columns as raw YYYY-MM-DD strings.
+// If pg parses them into JS Date objects, JSON serialization converts them
+// to UTC timestamps and the frontend can display the previous day.
+require('pg').types.setTypeParser(1082, (value) => value);
+
 // ── Create pool ───────────────────────────────────────────────────
 // sslmode=require is enforced via the DATABASE_URL query parameter.
 // The URL format is: postgresql://user:pass@host:5432/db?sslmode=require
