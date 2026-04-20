@@ -6,13 +6,19 @@ require('dotenv').config();
 // All other app config lives in src/config/env.js and is used
 // by the running application, not by the migration runner.
 
+const databaseUrl = process.env.DATABASE_URL;
+const useSsl = !/sslmode=disable/i.test(databaseUrl || '') &&
+  (process.env.DB_SSL || 'true').toLowerCase() !== 'false';
+
 module.exports = {
   client: 'pg',
 
-  connection: {
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }, // Required for Supabase/hosted Postgres
-  },
+  connection: useSsl
+    ? {
+        connectionString: databaseUrl,
+        ssl: { rejectUnauthorized: false }, // Required for Supabase/hosted Postgres
+      }
+    : databaseUrl,
 
   migrations: {
     directory: './migrations',   // Where migration files live

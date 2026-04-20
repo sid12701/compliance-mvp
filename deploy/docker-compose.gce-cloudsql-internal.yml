@@ -1,0 +1,42 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: ckyc-backend:latest
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env.production
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      WORKERS_ENABLED: "true"
+      PYTHON_SCRIPT_PATH: /app/backend/python
+      DATABASE_URL: ${CLOUDSQL_DATABASE_URL}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - cloud-sql-proxy
+      - redis
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  cloud-sql-proxy:
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.18.2
+    restart: unless-stopped
+    command:
+      - "--address=0.0.0.0"
+      - "--port=5432"
+      - "--credentials-file=/config/sa.json"
+      - "${INSTANCE_CONNECTION_NAME}"
+    volumes:
+      - ./gcp-service-account.json:/config/sa.json:ro
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

@@ -7,7 +7,6 @@ const {
   handleListUsers,
   handleCreateUser,
   handleUpdateUser,
-  handleListAuditLogs,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -19,8 +18,5 @@ router.use(requireRole('dev'));
 router.get('/users',        handleListUsers);
 router.post('/users',       handleCreateUser);
 router.patch('/users/:id',  handleUpdateUser);
-
-// ── Audit logs ────────────────────────────────────────────────
-router.get('/audit-logs',   handleListAuditLogs);
 
 module.exports = router;

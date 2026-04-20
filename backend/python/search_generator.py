@@ -14,7 +14,8 @@
 #   {
 #     "success":        true,
 #     "record_count":   187,
-#     "r2_key_written": "ckyc/09-03-2026/search/IN3860_09032026_V1.1_S00016.txt"
+#     "r2_key_written": "ckyc/09-03-2026/search/IN3860_09032026_V1.1_S00016.txt",
+#     "pan_dob_r2_key": "ckyc/09-03-2026/search/IN3860_09032026_V1.1_S00016_pan_dob.json"
 #   }
 #
 # Writes to stdout on failure (JSON):
@@ -574,11 +575,43 @@ def build_ckyc_file_bytes(customers: list[CustomerData], date_str: str) -> bytes
     return content.encode('utf-8')
 
 
+def build_pan_dob_payload(customers: list[CustomerData], target_date: str) -> dict:
+    """Builds the intermediate PAN/DOB mapping persisted for downstream jobs."""
+    unique_by_pan: dict[str, CustomerData] = {}
+    for cust in customers:
+        unique_by_pan.setdefault(cust.pan, cust)
+
+    return {
+        "target_date": target_date,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "customer_count": len(unique_by_pan),
+        "customers": [
+            {
+                "pan": cust.pan,
+                "aadhaar_last4": cust.aadhaar_last4,
+                "name": cust.name,
+                "dob": cust.dob,
+                "gender": cust.gender,
+                "has_aadhaar_line": cust.has_aadhaar_line,
+            }
+            for cust in unique_by_pan.values()
+        ],
+    }
+
+
+def derive_pan_dob_r2_key(search_r2_key: str) -> str:
+    if '.' in search_r2_key:
+        stem, _ = search_r2_key.rsplit('.', 1)
+    else:
+        stem = search_r2_key
+    return f"{stem}_pan_dob.json"
+
+
 # ════════════════════════════════════════════════════════════════════
 # PART 3 — R2 UPLOAD
 # ════════════════════════════════════════════════════════════════════
 
-def upload_to_r2(file_bytes: bytes, r2_key: str) -> None:
+def upload_to_r2(file_bytes: bytes, r2_key: str, content_type: str = 'text/plain') -> None:
     if not all([R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
                 R2_BUCKET_NAME, R2_PUBLIC_ENDPOINT]):
         raise RuntimeError(
@@ -602,7 +635,7 @@ def upload_to_r2(file_bytes: bytes, r2_key: str) -> None:
         Bucket      = R2_BUCKET_NAME,
         Key         = r2_key,
         Body        = file_bytes,
-        ContentType = 'text/plain',
+        ContentType = content_type,
     )
 
     log.info(f"Upload complete: {r2_key}")
@@ -678,11 +711,22 @@ def main():
         print(json.dumps({"success": False, "error": f"R2 upload failed: {e}"}))
         sys.exit(1)
 
+    pan_dob_r2_key = derive_pan_dob_r2_key(r2_output_key)
+    try:
+        pan_dob_payload = build_pan_dob_payload(customers, target_date)
+        pan_dob_bytes = json.dumps(pan_dob_payload).encode('utf-8')
+        upload_to_r2(pan_dob_bytes, pan_dob_r2_key, 'application/json')
+    except Exception as e:
+        log.error(f"PAN/DOB mapping upload failed: {e}")
+        print(json.dumps({"success": False, "error": f"PAN/DOB mapping upload failed: {e}"}))
+        sys.exit(1)
+
     # ── Step 4: Success ───────────────────────────────────────────
     result = {
         "success":        True,
         "record_count":   total_lines,
         "r2_key_written": r2_output_key,
+        "pan_dob_r2_key": pan_dob_r2_key,
     }
     log.info(f"search_generator.py complete — {total_lines} lines written to {r2_output_key}")
     print(json.dumps(result))

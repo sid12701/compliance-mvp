@@ -1,16 +1,13 @@
-// backend/src/workers/searchGen.worker.js
 'use strict';
 
-const { Worker }                = require('bullmq');
-const { pool }                  = require('../config/database');
-const { createRedisClient }     = require('../config/redis');
-const { QUEUE_NAMES }           = require('./queue');
-const { runPythonScript }       = require('../utils/ipcRunner');
-const { sanitizePAN }           = require('../utils/panSanitizer');
-const { AUDIT_ACTIONS }         = require('../constants/auditActions');
-const { insertAuditLog }        = require('../services/audit.service');
-const { sendGeneratedAlert,
-        sendFailedAlert }       = require('../services/email.service');
+const { Worker } = require('bullmq');
+const { pool } = require('../config/database');
+const { createRedisClient } = require('../config/redis');
+const { QUEUE_NAMES } = require('./queue');
+const { runPythonScript } = require('../utils/ipcRunner');
+const { sanitizePAN } = require('../utils/panSanitizer');
+const { sendGeneratedAlert, sendFailedAlert } = require('../services/email.service');
+const { appendBatchTimeline } = require('../services/timeline.service');
 
 function createSearchGenWorker() {
   const worker = new Worker(
@@ -18,17 +15,7 @@ function createSearchGenWorker() {
     async (job) => {
       const { batchId, targetDate, batchSequence, r2OutputKey, requestId } = job.data;
 
-      console.log(JSON.stringify({
-        level:     'INFO',
-        timestamp: new Date().toISOString(),
-        worker:    'searchGen',
-        batchId,
-        jobId:     job.id,
-        message:   `Starting search generation for ${targetDate}`,
-      }));
-
       try {
-        // ── Get today's next search sequence ───────────────────
         if (!batchSequence) {
           throw new Error('Missing batchSequence for search generation job.');
         }
@@ -36,86 +23,69 @@ function createSearchGenWorker() {
           throw new Error('Missing r2OutputKey for search generation job.');
         }
 
-
-        // ── Run Python script ──────────────────────────────────
         const result = await runPythonScript(
           'search_generator.py',
           {
-            target_date:    targetDate,
+            target_date: targetDate,
             batch_sequence: batchSequence,
-            r2_output_key:  r2OutputKey,
+            r2_output_key: r2OutputKey,
           },
           requestId
         );
 
-        // ── Update batch: PROCESSING → GENERATED ──────────────
         await pool.query(
           `UPDATE ckyc_batches
-           SET status          = 'GENERATED',
+           SET status = 'GENERATED',
                search_file_key = $2,
-               pan_dob_r2_key  = $3,
-               error_message   = NULL
+               pan_dob_r2_key = $3,
+               error_message = NULL
            WHERE id = $1 AND status = 'PROCESSING'`,
           [batchId, result.r2_key_written || r2OutputKey, result.pan_dob_r2_key || null]
         );
 
-        await insertAuditLog({
-          userId:   null,
-          action:   AUDIT_ACTIONS.BATCH_GENERATED,
+        await appendBatchTimeline({
           batchId,
+          type: 'search_generated',
           metadata: {
-            target_date:    targetDate,
-            file_sequence:  batchSequence,
-            record_count:   result.record_count || 0,
-            r2_key:         result.r2_key_written || r2OutputKey,
-            triggered_by:   requestId === 'cron' ? 'cron' : 'manual',
+            target_date: targetDate,
+            batch_sequence: batchSequence,
+            record_count: result.record_count || 0,
+            r2_key: result.r2_key_written || r2OutputKey,
           },
         });
 
         sendGeneratedAlert({
           targetDate,
           batchSequence,
-          recordCount:   result.record_count || 0,
+          recordCount: result.record_count || 0,
           batchId,
         }).catch(() => {});
-
-        console.log(JSON.stringify({
-          level:        'INFO',
-          timestamp:    new Date().toISOString(),
-          worker:       'searchGen',
-          batchId,
-          message:      `Search generation complete`,
-          file_seq:     batchSequence,
-          record_count: result.record_count || 0,
-        }));
-
       } catch (err) {
         const sanitizedError = sanitizePAN(err.message || 'Unknown error', 500);
 
         await pool.query(
           `UPDATE ckyc_batches
-           SET status        = 'FAILED',
+           SET status = 'FAILED',
                error_message = $2
            WHERE id = $1`,
           [batchId, sanitizedError]
         );
 
-        await insertAuditLog({
-          userId:   null,
-          action:   AUDIT_ACTIONS.BATCH_FAILED,
+        await appendBatchTimeline({
           batchId,
+          type: 'batch_failed',
           metadata: {
-            target_date:    targetDate,
+            target_date: targetDate,
             batch_sequence: batchSequence,
-            error:          sanitizedError,
-            stage:          'search_generation',
+            stage: 'search_generation',
+            error: sanitizedError,
           },
         });
 
         sendFailedAlert({
           targetDate,
           batchSequence,
-          stage:        'search_generation',
+          stage: 'search_generation',
           errorMessage: sanitizedError,
           batchId,
         }).catch(() => {});
@@ -124,19 +94,19 @@ function createSearchGenWorker() {
       }
     },
     {
-      connection:      createRedisClient(),
-      concurrency:     1,          // (or 2 — keep as-is per worker)
-      stalledInterval: 300000,     // check stalled jobs every 5 min
+      connection: createRedisClient(),
+      concurrency: 1,
+      stalledInterval: 300000,
       maxStalledCount: 1,
-      drainDelay:      1,          // 0 = use blocking pop (push-based, no polling)
+      drainDelay: 1,
     }
-      );
+  );
 
   worker.on('failed', (job, err) => {
     console.error(JSON.stringify({
-      level:   'ERROR',
-      worker:  'searchGen',
-      jobId:   job?.id,
+      level: 'ERROR',
+      worker: 'searchGen',
+      jobId: job?.id,
       message: `Job permanently failed: ${sanitizePAN(err.message)}`,
     }));
   });

@@ -14,7 +14,6 @@ const { testConnection } = require('./config/database');
 const { attachRequestId } = require('./middleware/requestId');
 const { errorHandler }    = require('./middleware/errorHandler');
 const batchRoutes    = require('./routes/batches.routes');
-const internalRoutes = require('./routes/internal.routes');
 const { startWorkers, shutdownWorkers } = require('./workers/index');
 
 
@@ -24,9 +23,6 @@ const adminRoutes = require('./routes/admin.routes');
 const trainingRoutes = require('./routes/training.routes');
 
 // These will be added in later phases:
-// const batchRoutes    = require('./routes/batches.routes');
-// const internalRoutes = require('./routes/internal.routes');
-
 // ── Create Express app ────────────────────────────────────────────
 const app = express();
 
@@ -56,8 +52,8 @@ app.use((req, res, next) => {
   // and allow requests with no origin (e.g. Render health checks, curl)
   if (!origin || origin === allowedOrigin) {
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-cron-secret');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
 
@@ -130,13 +126,8 @@ app.get('/health', async (req, res) => {
 // Versioned API routes
 app.use('/api/v1/auth',     authRoutes);
 app.use('/api/v1/batches',   batchRoutes);
-app.use('/api/v1/internal',  internalRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/training', trainingRoutes);
-
-// Phase 4 will add:
-// app.use('/api/v1/batches',  batchRoutes);
-// app.use('/api/v1/internal', internalRoutes);
 
 // 404 handler — catches any route that did not match above
 app.use((req, res) => {

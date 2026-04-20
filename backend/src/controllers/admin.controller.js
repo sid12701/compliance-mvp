@@ -69,23 +69,8 @@ async function handleUpdateUser(req, res, next) {
   } catch (err) { next(err); }
 }
 
-// ── GET /api/v1/admin/audit-logs ─────────────────────────────
-async function handleListAuditLogs(req, res, next) {
-  try {
-    const { page, limit, user_id, action, batch_id, start_date, end_date } = req.query;
-
-    const result = await adminService.listAuditLogs({
-      page, limit, userId: user_id, action, batchId: batch_id,
-      startDate: start_date, endDate: end_date,
-    });
-
-    res.status(200).json({ success: true, data: result });
-  } catch (err) { next(err); }
-}
-
 module.exports = {
   handleListUsers,
   handleCreateUser,
   handleUpdateUser,
-  handleListAuditLogs,
 };

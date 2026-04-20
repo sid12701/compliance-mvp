@@ -8,8 +8,6 @@ const { pool }            = require('../config/database');
 const config              = require('../config/env');
 const { AppError,
         ERROR_CODES }     = require('../constants/errorCodes');
-const { AUDIT_ACTIONS }   = require('../constants/auditActions');
-const { insertAuditLog }  = require('./audit.service');
 
 const DUMMY_HASH = '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewLj.4S/lJFyKW1C';
 
@@ -27,17 +25,6 @@ async function login({ username, password, ipAddress, requestId }) {
   const passwordMatch = await bcrypt.compare(password, hashToTest);
 
   if (!user || !passwordMatch) {
-    await insertAuditLog({
-      userId:    null,
-      action:    AUDIT_ACTIONS.LOGIN_FAILED,
-      batchId:   null,
-      ipAddress,
-      metadata:  {
-        username_attempted: username,
-        reason: !user ? 'user_not_found' : 'invalid_password',
-      },
-    });
-
     throw new AppError(
       'Invalid username or password.',
       401,
@@ -67,14 +54,6 @@ async function login({ username, password, ipAddress, requestId }) {
     console.error(`[Auth] Failed to update last_login_at for ${user.id}:`, err.message);
   });
 
-  await insertAuditLog({
-    userId:    user.id,
-    action:    AUDIT_ACTIONS.LOGIN,
-    batchId:   null,
-    ipAddress,
-    metadata:  { username: user.username },
-  });
-
   return {
     token,
     user: {
@@ -86,15 +65,6 @@ async function login({ username, password, ipAddress, requestId }) {
 }
 
 async function logout({ userId, username, jti, expiresAt, ipAddress }) {
-
-  await insertAuditLog({
-    userId,
-    action:    AUDIT_ACTIONS.LOGOUT,
-    batchId:   null,
-    ipAddress,
-    metadata:  {},
-  });
-
   await pool.query(
     `INSERT INTO token_blacklist (jti, expires_at)
      VALUES ($1, $2)

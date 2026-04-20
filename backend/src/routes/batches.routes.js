@@ -5,6 +5,7 @@ const express          = require('express');
 const { authenticate } = require('../middleware/authenticate');
 const {
   handleListBatches,
+  handleListOperators,
   handleGetBatch,
   handleGenerateBatches,
   handleGetSearchUrl,
@@ -14,7 +15,6 @@ const {
   handleGetFinalUrls,
   handleGenerateUpload,
   handleGenerateSearchStandalone,
-  handleListStandaloneSearches,
   handleGetStandaloneSearchUrl,
   handleStandaloneSearchStream,
 } = require('../controllers/batches.controller');
@@ -29,9 +29,9 @@ router.use(authenticate);
 
 // Batch listing and detail
 router.get('/',    handleListBatches);
+router.get('/operators', handleListOperators);
 
-// Standalone search listing + url (must be before /:id)
-router.get('/standalone-searches', handleListStandaloneSearches);
+// Standalone search url (must be before /:id)
 router.get('/standalone-search-url', handleGetStandaloneSearchUrl);
 
 router.get('/:id', handleGetBatch);

@@ -10,14 +10,12 @@ const { getNextFileSequence }    = require('../utils/fileSequence');
 const { formatDateForFilename,
         todayIST }               = require('../utils/istTime');
 const r2Service                  = require('../services/r2.service');
-const { insertAuditLog }         = require('../services/audit.service');
-const { AUDIT_ACTIONS }          = require('../constants/auditActions');
 
 function createStandaloneSearchWorker() {
   const worker = new Worker(
     QUEUE_NAMES.STANDALONE_SEARCH,
     async (job) => {
-      const { jobId, targetDate, requestId, userId, ipAddress } = job.data;
+      const { jobId, targetDate, requestId } = job.data;
 
       try {
         // Build filename with today's date + next sequence
@@ -42,21 +40,6 @@ function createStandaloneSearchWorker() {
           r2OutputKey,
           filename
         );
-
-        await insertAuditLog({
-          userId,
-          action:   AUDIT_ACTIONS.SEARCH_FILE_DOWNLOADED,
-          batchId:  null,
-          ipAddress,
-          metadata: {
-            target_date:   targetDate,
-            file_sequence: fileSeq,
-            record_count:  result.record_count,
-            r2_key:        r2OutputKey,
-            filename,
-            standalone:    true,
-          },
-        });
 
         return {
           url,

@@ -1,20 +1,17 @@
-// backend/src/workers/uploadGen.worker.js
 'use strict';
 
-const { Worker }                = require('bullmq');
-const { pool }                  = require('../config/database');
-const { createRedisClient }     = require('../config/redis');
-const { QUEUE_NAMES }           = require('./queue');
-const { runPythonScript }       = require('../utils/ipcRunner');
-const { sanitizePAN }           = require('../utils/panSanitizer');
-const { AUDIT_ACTIONS }         = require('../constants/auditActions');
-const { insertAuditLog }        = require('../services/audit.service');
-const { sendFailedAlert }       = require('../services/email.service');
-const { r2Paths }               = require('../utils/r2Paths');
-const { _trySetCompleted }      = require('./bulkDownload.worker');
-const { getNextFileSequence }   = require('../utils/fileSequence');
-const { formatDateForFilename,
-        todayIST }              = require('../utils/istTime');
+const { Worker } = require('bullmq');
+const { pool } = require('../config/database');
+const { createRedisClient } = require('../config/redis');
+const { QUEUE_NAMES } = require('./queue');
+const { runPythonScript } = require('../utils/ipcRunner');
+const { sanitizePAN } = require('../utils/panSanitizer');
+const { sendFailedAlert } = require('../services/email.service');
+const { r2Paths } = require('../utils/r2Paths');
+const { _trySetFinalFilesReady } = require('./bulkDownload.worker');
+const { getNextFileSequence } = require('../utils/fileSequence');
+const { formatDateForFilename, todayIST } = require('../utils/istTime');
+const { appendBatchTimeline } = require('../services/timeline.service');
 
 function createUploadGenWorker() {
   const worker = new Worker(
@@ -22,18 +19,11 @@ function createUploadGenWorker() {
     async (job) => {
       const { batchId, targetDate, batchSequence, requestId } = job.data;
 
-      console.log(JSON.stringify({
-        level:     'INFO',
-        timestamp: new Date().toISOString(),
-        worker:    'uploadGen',
-        batchId,
-        message:   `Starting upload generation for ${targetDate}`,
-      }));
-
       try {
-        // ── Fetch upload_list from DB ──────────────────────────
         const batchResult = await pool.query(
-          `SELECT response_analysis_result FROM ckyc_batches WHERE id = $1`,
+          `SELECT response_analysis_result
+           FROM ckyc_batches
+           WHERE id = $1`,
           [batchId]
         );
 
@@ -43,39 +33,29 @@ function createUploadGenWorker() {
 
         const analysisResult = batchResult.rows[0].response_analysis_result;
         if (!analysisResult || !analysisResult.upload_list) {
-          throw new Error(
-            `No upload_list found in response_analysis_result for batch ${batchId}`
-          );
+          throw new Error(`No upload_list found in response_analysis_result for batch ${batchId}`);
         }
 
-        // ── Get today's next upload sequence ───────────────────
-        // Filename uses today's date + today's sequence
-        // but file is stored in targetDate's R2 folder
-        const fileSeq   = await getNextFileSequence('upload');
-        const seqStr    = String(fileSeq).padStart(5, '0');
-        const today     = todayIST();
-        const dateStr   = formatDateForFilename(today)
-
-        // R2 prefix uses targetDate folder, filename uses today's date
+        const fileSeq = await getNextFileSequence('upload');
+        const today = todayIST();
+        const dateStr = formatDateForFilename(today);
         const r2OutputKeyPrefix = r2Paths.prefix(targetDate, 'upload');
 
-        // ── Run Python script ──────────────────────────────────
         const result = await runPythonScript(
           'upload_generator.py',
           {
-            target_date:          targetDate,
-            batch_sequence:       fileSeq,
-            pan_list:             analysisResult.upload_list,
+            target_date: targetDate,
+            batch_sequence: fileSeq,
+            pan_list: analysisResult.upload_list,
             r2_output_key_prefix: r2OutputKeyPrefix,
-            filename_date:        dateStr,   // today's date for filename
+            filename_date: dateStr,
           },
           requestId
         );
 
         const primaryKey = result.files_generated?.[0]?.r2_key
-          || `${r2OutputKeyPrefix}IN3860_IT_${dateStr}_V1.3_U${seqStr}.zip`;
+          || `${r2OutputKeyPrefix}IN3860_IT_${dateStr}_V1.3_U${String(fileSeq).padStart(5, '0')}.zip`;
 
-        // ── Update upload_file_key ─────────────────────────────
         await pool.query(
           `UPDATE ckyc_batches
            SET upload_file_key = $2
@@ -83,55 +63,43 @@ function createUploadGenWorker() {
           [batchId, primaryKey]
         );
 
-        // ── Try to set COMPLETED ───────────────────────────────
-        await _trySetCompleted(batchId);
-
-        await insertAuditLog({
-          action:   AUDIT_ACTIONS.BATCH_GENERATED,
+        await appendBatchTimeline({
           batchId,
+          type: 'upload_file_ready',
           metadata: {
-            target_date:    targetDate,
-            file_sequence:  fileSeq,
+            target_date: targetDate,
+            file_sequence: fileSeq,
             files_generated: result.files_generated?.length || 0,
-            stage:          'upload_generation',
+            r2_key: primaryKey,
           },
         });
 
-        console.log(JSON.stringify({
-          level:           'INFO',
-          timestamp:       new Date().toISOString(),
-          worker:          'uploadGen',
-          batchId,
-          message:         'Upload generation complete',
-          file_seq:        fileSeq,
-          files_generated: result.files_generated?.length || 0,
-        }));
-
+        await _trySetFinalFilesReady(batchId);
       } catch (err) {
         const sanitizedError = sanitizePAN(err.message || 'Unknown error', 500);
 
         await pool.query(
           `UPDATE ckyc_batches
-           SET status        = 'FAILED',
+           SET status = 'FAILED',
                error_message = $2
            WHERE id = $1`,
           [batchId, sanitizedError]
         );
 
-        await insertAuditLog({
-          action:   AUDIT_ACTIONS.BATCH_FAILED,
+        await appendBatchTimeline({
           batchId,
+          type: 'batch_failed',
           metadata: {
             target_date: targetDate,
-            error:       sanitizedError,
-            stage:       'upload_generation',
+            stage: 'upload_generation',
+            error: sanitizedError,
           },
         });
 
         sendFailedAlert({
           targetDate,
           batchSequence,
-          stage:        'upload_generation',
+          stage: 'upload_generation',
           errorMessage: sanitizedError,
           batchId,
         }).catch(() => {});
@@ -140,19 +108,19 @@ function createUploadGenWorker() {
       }
     },
     {
-      connection:      createRedisClient(),
-      concurrency:     1,          // (or 2 — keep as-is per worker)
-      stalledInterval: 300000,     // check stalled jobs every 5 min
+      connection: createRedisClient(),
+      concurrency: 1,
+      stalledInterval: 300000,
       maxStalledCount: 1,
-      drainDelay:      1,          // 0 = use blocking pop (push-based, no polling)
+      drainDelay: 1,
     }
-      );
+  );
 
   worker.on('failed', (job, err) => {
     console.error(JSON.stringify({
-      level:   'ERROR',
-      worker:  'uploadGen',
-      jobId:   job?.id,
+      level: 'ERROR',
+      worker: 'uploadGen',
+      jobId: job?.id,
       message: `Job permanently failed: ${sanitizePAN(err.message)}`,
     }));
   });

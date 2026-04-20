@@ -1,18 +1,15 @@
-// backend/src/controllers/batches.controller.js
 'use strict';
 
 const { AppError, ERROR_CODES } = require('../constants/errorCodes');
-const batchService              = require('../services/batch.service');
-const { listStandaloneSearches } = require('../services/audit.service');
+const batchService = require('../services/batch.service');
 
-// ── GET /api/v1/batches ───────────────────────────────────────────
 async function handleListBatches(req, res, next) {
   try {
     const { start_date, end_date, status, page, limit } = req.query;
 
     const result = await batchService.listBatches({
       startDate: start_date,
-      endDate:   end_date,
+      endDate: end_date,
       status,
       page,
       limit,
@@ -24,35 +21,41 @@ async function handleListBatches(req, res, next) {
   }
 }
 
-// ── GET /api/v1/batches/:id ───────────────────────────────────────
+async function handleListOperators(req, res, next) {
+  try {
+    const operators = await batchService.listOperators();
+    res.status(200).json({ success: true, data: { operators } });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function handleGetBatch(req, res, next) {
   try {
-    const batch = await batchService.getBatchById({
-      batchId:   req.params.id,
-      userId:    req.user.id,
-      ipAddress: req.ip,
-    });
-
+    const batch = await batchService.getBatchById({ batchId: req.params.id });
     res.status(200).json({ success: true, data: { batch } });
   } catch (err) {
     next(err);
   }
 }
 
-// ── POST /api/v1/batches/generate ────────────────────────────────
 async function handleGenerateBatches(req, res, next) {
   try {
-    const { start_date, end_date } = req.body;
+    const {
+      start_date,
+      end_date,
+      primary_ops_user_id,
+      secondary_ops_user_id,
+    } = req.body;
 
-    if (!start_date || !end_date) {
+    if (!start_date || !end_date || !primary_ops_user_id || !secondary_ops_user_id) {
       throw new AppError(
-        'Request body must include start_date and end_date in YYYY-MM-DD format.',
+        'Request body must include start_date, end_date, primary_ops_user_id, and secondary_ops_user_id in valid format.',
         400,
         ERROR_CODES.INVALID_REQUEST
       );
     }
 
-    // Basic format validation
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateRegex.test(start_date) || !dateRegex.test(end_date)) {
       throw new AppError(
@@ -64,9 +67,10 @@ async function handleGenerateBatches(req, res, next) {
 
     const result = await batchService.generateBatches({
       startDate: start_date,
-      endDate:   end_date,
-      userId:    req.user.id,
-      ipAddress: req.ip,
+      endDate: end_date,
+      primaryOpsUserId: primary_ops_user_id,
+      secondaryOpsUserId: secondary_ops_user_id,
+      user: req.user,
       requestId: req.requestId,
     });
 
@@ -76,13 +80,11 @@ async function handleGenerateBatches(req, res, next) {
   }
 }
 
-// ── GET /api/v1/batches/:id/search-url ───────────────────────────
 async function handleGetSearchUrl(req, res, next) {
   try {
     const result = await batchService.getSearchDownloadUrl({
-      batchId:   req.params.id,
-      userId:    req.user.id,
-      ipAddress: req.ip,
+      batchId: req.params.id,
+      user: req.user,
     });
 
     res.status(200).json({ success: true, data: result });
@@ -91,22 +93,31 @@ async function handleGetSearchUrl(req, res, next) {
   }
 }
 
-// ── POST /api/v1/batches/:id/confirm-upload ───────────────────────
 async function handleConfirmUpload(req, res, next) {
   try {
+    const { file_type } = req.body;
+
+    if (!file_type) {
+      throw new AppError(
+        'Request body must include file_type.',
+        400,
+        ERROR_CODES.INVALID_REQUEST
+      );
+    }
+
     const batch = await batchService.confirmCKYCUpload({
-      batchId:   req.params.id,
-      userId:    req.user.id,
-      ipAddress: req.ip,
+      batchId: req.params.id,
+      fileType: file_type,
+      user: req.user,
     });
 
     res.status(200).json({
       success: true,
       data: {
-        message:          'CKYC portal upload confirmed successfully.',
-        batch_id:         batch.id,
-        status:           batch.status,
-        is_uploaded_ckyc: batch.is_uploaded_ckyc,
+        message: 'CKYC portal upload confirmed successfully.',
+        batch_id: batch.id,
+        status: batch.status,
+        current_assignee_user_id: batch.current_assignee_user_id,
       },
     });
   } catch (err) {
@@ -114,7 +125,6 @@ async function handleConfirmUpload(req, res, next) {
   }
 }
 
-// ── GET /api/v1/batches/:id/response-upload-url ───────────────────
 async function handleGetResponseUploadUrl(req, res, next) {
   try {
     const { filename } = req.query;
@@ -129,10 +139,9 @@ async function handleGetResponseUploadUrl(req, res, next) {
     }
 
     const result = await batchService.getResponseUploadUrl({
-      batchId:   req.params.id,
+      batchId: req.params.id,
       filename,
-      userId:    req.user.id,
-      ipAddress: req.ip,
+      user: req.user,
     });
 
     res.status(200).json({ success: true, data: result });
@@ -141,7 +150,6 @@ async function handleGetResponseUploadUrl(req, res, next) {
   }
 }
 
-// ── POST /api/v1/batches/:id/process-response ─────────────────────
 async function handleProcessResponse(req, res, next) {
   try {
     const { filename } = req.body;
@@ -155,10 +163,9 @@ async function handleProcessResponse(req, res, next) {
     }
 
     const result = await batchService.processResponse({
-      batchId:   req.params.id,
+      batchId: req.params.id,
       filename,
-      userId:    req.user.id,
-      ipAddress: req.ip,
+      user: req.user,
       requestId: req.requestId,
     });
 
@@ -174,13 +181,11 @@ async function handleProcessResponse(req, res, next) {
   }
 }
 
-// ── GET /api/v1/batches/:id/final-urls ───────────────────────────
 async function handleGetFinalUrls(req, res, next) {
   try {
     const result = await batchService.getFinalUrls({
-      batchId:   req.params.id,
-      userId:    req.user.id,
-      ipAddress: req.ip,
+      batchId: req.params.id,
+      user: req.user,
     });
 
     res.status(200).json({ success: true, data: result });
@@ -189,7 +194,6 @@ async function handleGetFinalUrls(req, res, next) {
   }
 }
 
-// ── POST /api/v1/batches/generate-upload ─────────────────────────
 async function handleGenerateUpload(req, res, next) {
   try {
     const { pan_list, source_batch_id } = req.body;
@@ -211,10 +215,8 @@ async function handleGenerateUpload(req, res, next) {
     }
 
     const result = await batchService.generateUploadFile({
-      panList:       pan_list || null,
+      panList: pan_list || null,
       sourceBatchId: source_batch_id || null,
-      userId:        req.user.id,
-      ipAddress:     req.ip,
     });
 
     res.status(200).json({ success: true, data: result });
@@ -246,9 +248,9 @@ async function handleGenerateSearchStandalone(req, res, next) {
 
     const result = await batchService.generateSearchStandalone({
       targetDate: target_date,
-      userId:     req.user.id,
-      ipAddress:  req.ip,
-      requestId:  req.requestId,
+      userId: req.user.id,
+      ipAddress: req.ip,
+      requestId: req.requestId,
     });
 
     res.status(202).json({ success: true, data: result });
@@ -257,26 +259,12 @@ async function handleGenerateSearchStandalone(req, res, next) {
   }
 }
 
-// â”€â”€ GET /api/v1/batches/standalone-searches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-async function handleListStandaloneSearches(req, res, next) {
-  try {
-    const { limit } = req.query;
-    const searches = await listStandaloneSearches(limit);
-    res.status(200).json({ success: true, data: { searches } });
-  } catch (err) {
-    next(err);
-  }
-}
-
-// â”€â”€ GET /api/v1/batches/standalone-search-url â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function handleGetStandaloneSearchUrl(req, res, next) {
   try {
     const { r2_key, filename } = req.query;
     const result = await batchService.getStandaloneSearchDownloadUrl({
-      r2Key:    r2_key,
-      filename: filename,
-      userId:   req.user.id,
-      ipAddress: req.ip,
+      r2Key: r2_key,
+      filename,
     });
     res.status(200).json({ success: true, data: result });
   } catch (err) {
@@ -356,9 +344,9 @@ async function handleStandaloneSearchStream(req, res, next) {
   }
 }
 
-
 module.exports = {
   handleListBatches,
+  handleListOperators,
   handleGetBatch,
   handleGenerateBatches,
   handleGetSearchUrl,
@@ -366,9 +354,8 @@ module.exports = {
   handleGetResponseUploadUrl,
   handleProcessResponse,
   handleGetFinalUrls,
-  handleGenerateUpload,  
+  handleGenerateUpload,
   handleGenerateSearchStandalone,
-  handleListStandaloneSearches,
   handleGetStandaloneSearchUrl,
   handleStandaloneSearchStream,
 };
